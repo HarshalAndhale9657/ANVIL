@@ -57,6 +57,17 @@ def _signature_hash(code: str) -> str:
     return hashlib.sha256(code.encode()).hexdigest()
 
 
+def reset_circuit_breaker() -> None:
+    """
+    Clear the per-scan signature dedup counter.
+
+    Called at the start of every scan (CPN ingress) so the breaker is scoped
+    to a single scan: identical payloads from *previous* scans never trip it,
+    and the dict cannot grow without bound across the process lifetime.
+    """
+    _seen_hashes.clear()
+
+
 # ── AST validation ───────────────────────────────────────────────────────────
 
 class _DangerousNodeVisitor(ast.NodeVisitor):
@@ -157,48 +168,65 @@ def execute_payload(
     Returns (success, stdout, stderr).
     Fail-closed: any validation failure → (False, "", error_msg).
     """
-    # ── Circuit breaker: signature dedup ──────────────────────────────────
+    # ── Circuit breaker: signature dedup (counts FAILED runs only) ────────
+    # The counter is bumped only when a run actually fails (see below), so a
+    # payload is blocked once it has failed `max_retries` times — never merely
+    # because it was *attempted* that many times. This lets a scan's final
+    # (and possibly first-successful) retry actually run.
     sig = _signature_hash(code)
-    _seen_hashes[sig] = _seen_hashes.get(sig, 0) + 1
-    if _seen_hashes[sig] > max_retries:
-        msg = f"Circuit breaker: payload hash {sig[:12]}… attempted {_seen_hashes[sig]} times. Blocked."
+    if _seen_hashes.get(sig, 0) >= max_retries:
+        msg = f"Circuit breaker: payload hash {sig[:12]}… failed {_seen_hashes[sig]} times. Blocked."
         logger.warning(msg)
         return False, "", msg
+
+    def _record_failure() -> None:
+        _seen_hashes[sig] = _seen_hashes.get(sig, 0) + 1
 
     # ── AST validation ───────────────────────────────────────────────────
     ok, reason = validate_code(code)
     if not ok:
         logger.warning("Sandbox rejected payload: %s", reason)
+        _record_failure()
         return False, "", reason
 
-    # ── Write to temp file & execute ─────────────────────────────────────
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, dir="."
-    ) as tmp:
-        tmp.write(code)
-        tmp_path = Path(tmp.name)
+    # ── Write to an isolated temp dir & execute ──────────────────────────
+    # A dedicated per-execution directory (not the server CWD) prevents temp
+    # files from polluting the working directory and keeps concurrent scans
+    # from colliding on relative paths.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="anvil_sbx_"))
+    tmp_path = tmp_dir / "payload.py"
+    tmp_path.write_text(code, encoding="utf-8")
 
     try:
-        # Build a safe environment that allows Python + networking to work
-        # on Windows, while stripping all sensitive credentials.
-        #
-        # Strategy: start from the FULL host environment (so SSL, DNS, proxy,
-        # and Python path resolution all work), then DELETE known-dangerous
-        # variables that could leak secrets to the payload.
+        # Build a safe environment with a fail-closed ALLOWLIST: only the
+        # variables Python startup, TLS/DNS, and HTTP egress legitimately need
+        # are forwarded. Every other variable — including any current-or-future
+        # secret — is dropped by default rather than relying on a denylist that
+        # silently leaks anything not explicitly named.
         import os as _os
-        safe_env = dict(_os.environ)
 
-        # Strip ALL known credential / secret variables
-        _DANGEROUS_VARS = {
-            "OPENAI_API_KEY", "GITHUB_TOKEN", "GITHUB_CLIENT_ID",
-            "GITHUB_CLIENT_SECRET", "SESSION_SECRET", "OMIUM_API_KEY",
-            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
-            "AZURE_CLIENT_SECRET", "GCP_SERVICE_ACCOUNT_KEY",
-            "DATABASE_URL", "DB_PASSWORD", "REDIS_URL",
-            "SECRET_KEY", "JWT_SECRET", "COOKIE_SECRET",
+        _ALLOWED_VARS = {
+            # Windows OS essentials
+            "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+            "TEMP", "TMP", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+            "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+            # POSIX OS essentials (if run on Linux/Docker)
+            "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+            # Python resolution
+            "PYTHONHOME", "PYTHONPATH", "PYTHONIOENCODING", "PYTHONUTF8",
+            # TLS / CA bundles (so requests HTTPS works)
+            "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+            # Proxy (if the operator routes egress through a proxy)
+            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+            "HTTP_PROXY".lower(), "HTTPS_PROXY".lower(), "NO_PROXY".lower(),
         }
-        for var in _DANGEROUS_VARS:
-            safe_env.pop(var, None)
+        _allowed_upper = {v.upper() for v in _ALLOWED_VARS}
+        # Match case-insensitively (Windows env keys vary in case) while
+        # preserving the original key name and value.
+        safe_env = {
+            k: v for k, v in _os.environ.items() if k.upper() in _allowed_upper
+        }
 
         result = subprocess.run(
             [sys.executable, str(tmp_path)],
@@ -206,18 +234,28 @@ def execute_payload(
             text=True,
             timeout=timeout,
             env=safe_env,
-            cwd=".",
+            cwd=str(tmp_dir),
         )
-        return (
-            result.returncode == 0,
-            result.stdout,
-            result.stderr,
-        )
+        success = result.returncode == 0
+        if success:
+            _seen_hashes.pop(sig, None)
+        else:
+            _record_failure()
+        return (success, result.stdout, result.stderr)
     except subprocess.TimeoutExpired:
         msg = f"Sandbox timeout after {timeout}s"
         logger.warning(msg)
+        _record_failure()
         return False, "", msg
     except Exception as exc:
+        _record_failure()
         return False, "", f"Sandbox error: {exc}"
     finally:
-        tmp_path.unlink(missing_ok=True)
+        # Best-effort cleanup. On Windows a just-killed child may still hold a
+        # lock on the temp file for a moment; swallow the resulting error so it
+        # never masks the real return value.
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(tmp_dir, ignore_errors=True)
+        except Exception:
+            pass

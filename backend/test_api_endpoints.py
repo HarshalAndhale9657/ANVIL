@@ -62,15 +62,17 @@ def test_scan_unauthed():
     print(f"  Status: {r.status_code}")
     assert r.status_code == 401, f"Expected 401, got {r.status_code}"
 
-def test_scan_get_404():
+def test_scan_get_requires_auth():
+    # Scan result is owner-scoped: unauthenticated access is rejected (401)
+    # before any 404 lookup, so a scan_id cannot be probed anonymously.
     r = requests.get(f"{BASE}/api/scan/nonexistent123", timeout=10)
     print(f"  Status: {r.status_code}")
-    assert r.status_code == 404, f"Expected 404, got {r.status_code}"
+    assert r.status_code == 401, f"Expected 401 (auth required), got {r.status_code}"
 
-def test_scan_stream_404():
+def test_scan_stream_requires_auth():
     r = requests.get(f"{BASE}/api/scan/nonexistent123/stream", timeout=10)
     print(f"  Status: {r.status_code}")
-    assert r.status_code == 404, f"Expected 404, got {r.status_code}"
+    assert r.status_code == 401, f"Expected 401 (auth required), got {r.status_code}"
 
 def test_legacy_webhook():
     r = requests.post(f"{BASE}/webhook", json={"test": True}, timeout=10)
@@ -108,8 +110,8 @@ test("OpenAPI Docs", test_openapi)
 test("GitHub OAuth Redirect", test_oauth_redirect)
 test("Auth /me (unauthenticated)", test_auth_me_unauthed)
 test("POST /api/scan (unauthenticated)", test_scan_unauthed)
-test("GET /api/scan/{id} (not found)", test_scan_get_404)
-test("GET /api/scan/{id}/stream (not found)", test_scan_stream_404)
+test("GET /api/scan/{id} (auth required)", test_scan_get_requires_auth)
+test("GET /api/scan/{id}/stream (auth required)", test_scan_stream_requires_auth)
 test("Legacy Webhook", test_legacy_webhook)
 test("CORS Headers", test_cors_headers)
 test("Auth Logout", test_auth_logout)

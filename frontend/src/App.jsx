@@ -191,7 +191,7 @@ export default function App() {
                 { n:'01', color:'#00b4ff', title:'GitHub OAuth',
                   desc:'Authenticate with GitHub so A.E.G.I.S. can clone your repo and open a Pull Request with the fix using the repo scope.' },
                 { n:'02', color:'#00ff9d', title:'Webhook Trigger',
-                  desc:'POST /api/scan starts the pipeline. FastAPI validates the Pydantic schema, returns HTTP 202 instantly, and fires the Celery task.' },
+                  desc:'POST /api/scan starts the pipeline. FastAPI validates the Pydantic schema, returns HTTP 202 instantly, and runs the scan as an async background task.' },
                 { n:'03', color:'#00ff9d', title:'Reconnaissance',
                   desc:'Agent 1 reads source files via GPT-4o source analysis, identifies vulnerable endpoints. Strict ReconOutput JSON — no raw strings.' },
                 { n:'04', color:'#ff9f1c', title:'Exploitation',
@@ -199,7 +199,7 @@ export default function App() {
                 { n:'05', color:'#ffe34d', title:'Verification',
                   desc:'The deterministic Verifier checks sandbox stdout for the exact flag. If it fails, the system retries the Exploiter (max 3×).' },
                 { n:'06', color:'#00ff9d', title:'Patch + PR',
-                  desc:'Agent 3 rewrites the AST, runs regression tests, commits to a fix/ branch, and opens a GitHub Pull Request — all automatically.' },
+                  desc:'Agent 3 generates a fix with GPT-4o, statically validates it, opens a fix/ branch, and creates a GitHub Pull Request — all automatically.' },
               ].map((step) => (
                 <div key={step.n} className={styles.step} style={{'--c': step.color}}>
                   <span className={styles.stepNum}>{step.n}</span>

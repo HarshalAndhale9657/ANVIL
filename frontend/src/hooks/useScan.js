@@ -47,8 +47,9 @@ function eventToLogLine(ev) {
     failed:    '✗',
   };
   const icon = icons[ev.stage] || '>';
-  let text = `${icon} ${ev.message}`;
-  if (ev.detail) text += `\n  ↳ ${ev.detail}`;
+  // NOTE: `detail` is intentionally NOT appended here — the caller renders it
+  // as its own separate line. Appending it here too would duplicate it.
+  const text = `${icon} ${ev.message}`;
   return { text, type: ev.status === 'error' ? 'warn' : STAGE_TYPE[ev.stage] || 'system' };
 }
 
@@ -99,7 +100,7 @@ export function useScan() {
 
     addLog('▶ A.E.G.I.S. v2.0.0 — Autonomous Exploit Generation and Intelligent Security', 'system');
     addLog(`▶ Omium trace initialized — W3C Trace Context propagation active`, 'system');
-    addLog(`▶ Redis Streams connected. SQLite WAL checkpoint active.`, 'system');
+    addLog(`▶ Async pipeline runner started. SQLite WAL checkpoint active.`, 'system');
     addLog(`⚡ [WEBHOOK] POST /api/scan — repo: ${url}`, 'event');
 
     try {
@@ -123,11 +124,17 @@ export function useScan() {
           const node = STAGE_TO_NODE[ev.stage];
           if (node) setPetriStage(node);
 
-          // Detect retry during verify
+          // Detect retry during verify. Keep the RETRYING x/y badge visible
+          // through the following retry events (which re-enter exploit/verify);
+          // only clear it once the pipeline actually leaves the retry loop
+          // (verify passed, or we advanced to patch/terminal).
           if (ev.stage === 'verify' && ev.status === 'running' && ev.message?.includes('retrying')) {
             const m = ev.message.match(/attempt (\d+)\/(\d+)/);
             if (m) setRetryInfo({ attempt: parseInt(m[1]), max: parseInt(m[2]) });
-          } else {
+          } else if (
+            ['patch', 'pushing', 'completed', 'failed'].includes(ev.stage) ||
+            (ev.stage === 'verify' && ev.status === 'done')
+          ) {
             setRetryInfo(null);
           }
 
@@ -160,18 +167,29 @@ export function useScan() {
           // Terminal state on completion
           if (ev.stage === 'completed') {
             addLog(`▶ A.E.G.I.S. mission complete — fetching full result...`, 'finish');
-            try {
-              const fullResult = await getScanResult(id);
-              // Ensure repo_url is present in result for display
+            // Retry once — the result is stored right as the terminal SSE event
+            // fires, so a single transient miss shouldn't degrade the card.
+            let fullResult = null;
+            for (let attempt = 0; attempt < 2 && !fullResult; attempt++) {
+              try {
+                fullResult = await getScanResult(id);
+              } catch (e) {
+                if (attempt === 0) {
+                  await new Promise(r => setTimeout(r, 600));
+                } else {
+                  addLog(`  ↳ Warning: could not fetch full result: ${e.message}`, 'warn');
+                }
+              }
+            }
+            if (fullResult) {
               if (!fullResult.repo_url) fullResult.repo_url = url;
               setResult(fullResult);
-              setPhaseTracked('complete');
-            } catch (e) {
-              addLog(`  ↳ Warning: could not fetch full result: ${e.message}`, 'warn');
-              // Still mark as complete — the scan itself succeeded
-              setResult({ repo_url: url, scan_id: id, status: 'completed' });
-              setPhaseTracked('complete');
+            } else {
+              // Still mark complete — the scan itself succeeded — but flag the
+              // card as partial so it doesn't imply "0 vulns / no patch".
+              setResult({ repo_url: url, scan_id: id, status: 'completed', partial: true });
             }
+            setPhaseTracked('complete');
             closeSSE.current?.();
           }
 

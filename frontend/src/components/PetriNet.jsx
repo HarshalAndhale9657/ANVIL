@@ -27,26 +27,48 @@ const EDGES = [
   { from: 3, to: 4 }, { from: 4, to: 5 }, { from: 5, to: 6 },
 ];
 
+const ERROR_STAGES = new Set(['error', 'failed']);
+
 export default function PetriNet({ currentStage }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [flowingEdge, setFlowingEdge] = useState(null);
+  const [errored, setErrored] = useState(false);
   const prevIndex = useRef(0);
 
   useEffect(() => {
     if (!currentStage) return;
+
+    // Pipeline failure: freeze at the last reached node and render it red.
+    // (Previously 'error'/'failed' mapped to the same index as DONE, so a
+    // failed scan animated all the way to a green "complete" state.)
+    if (ERROR_STAGES.has(currentStage)) {
+      setErrored(true);
+      setFlowingEdge(null);
+      return;
+    }
+
     const idx = STAGE_INDEX[currentStage] ?? 0;
+
+    if (idx < prevIndex.current) {
+      // Reset (new scan)
+      setErrored(false);
+      setActiveIndex(0);
+      prevIndex.current = 0;
+      setFlowingEdge(null);
+      return;
+    }
+
     if (idx > prevIndex.current) {
+      setErrored(false);
       setFlowingEdge(idx - 1);
-      setTimeout(() => {
+      // Clean up the timer so rapid SSE events can't stack transitions or
+      // fire state updates after the component unmounts.
+      const timer = setTimeout(() => {
         setActiveIndex(idx);
         prevIndex.current = idx;
         setFlowingEdge(null);
       }, 500);
-    } else if (idx < prevIndex.current) {
-      // Reset (new scan)
-      setActiveIndex(0);
-      prevIndex.current = 0;
-      setFlowingEdge(null);
+      return () => clearTimeout(timer);
     }
   }, [currentStage]);
 
@@ -99,18 +121,19 @@ export default function PetriNet({ currentStage }) {
           {NODES.map((node, i) => {
             const isActive = i === activeIndex;
             const isDone = i < activeIndex;
-            const color = isDone || isActive ? node.color : '#1e1e30';
+            const activeColor = errored && isActive ? '#ff3b3b' : node.color;
+            const color = isDone || isActive ? activeColor : '#1e1e30';
             const textColor = isDone || isActive ? '#06060b' : 'rgba(255,255,255,0.25)';
             return (
               <g key={node.id}>
                 {isActive && (
                   <circle cx={node.x} cy={node.y} r="38" fill="none"
-                    stroke={node.color} strokeWidth="1" opacity="0.4"
+                    stroke={activeColor} strokeWidth="1" opacity="0.4"
                     className={styles.pulseRing} />
                 )}
                 <circle cx={node.x} cy={node.y} r="26"
                   fill={color}
-                  stroke={isDone || isActive ? node.color : 'rgba(255,255,255,0.12)'}
+                  stroke={isDone || isActive ? activeColor : 'rgba(255,255,255,0.12)'}
                   strokeWidth={isActive ? 2.5 : 1.5}
                   className={isActive ? styles.nodeActive : ''}
                 />
@@ -121,9 +144,9 @@ export default function PetriNet({ currentStage }) {
                 </text>
                 {isActive && (
                   <text x={node.x} y={node.y + 50} textAnchor="middle"
-                    fill={node.color} fontSize="8"
+                    fill={activeColor} fontSize="8"
                     fontFamily="'Share Tech Mono', monospace" opacity="0.9">
-                    {node.desc}
+                    {errored ? 'PIPELINE FAILED' : node.desc}
                   </text>
                 )}
               </g>
@@ -142,8 +165,8 @@ export default function PetriNet({ currentStage }) {
         </div>
         <div className={styles.currentState}>
           CURRENT STATE:&nbsp;
-          <span style={{color: NODES[activeIndex]?.color || '#4a4a6a'}}>
-            {NODES[activeIndex]?.label || 'IDLE'}
+          <span style={{color: errored ? '#ff3b3b' : (NODES[activeIndex]?.color || '#4a4a6a')}}>
+            {errored ? 'FAILED' : (NODES[activeIndex]?.label || 'IDLE')}
           </span>
         </div>
       </div>

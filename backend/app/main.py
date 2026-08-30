@@ -8,6 +8,7 @@ The frontend (Vite app) will be served separately or proxied.
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +24,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    init_telemetry()
+    logger.info("Anvil API server ready")
+    yield
+    # Shutdown (nothing to tear down yet)
+
+
 app = FastAPI(
     title="Anvil — Autonomous Security Remediation",
     description=(
@@ -30,6 +41,7 @@ app = FastAPI(
         "generates exploits, verifies them, and creates Pull Requests with fixes."
     ),
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # ── CORS — allow the Vite dev server to call the API ─────────────────────────
@@ -52,12 +64,6 @@ app.add_middleware(
 # ── Mount routers ────────────────────────────────────────────────────────────
 app.include_router(auth_router)
 app.include_router(api_router)
-
-
-@app.on_event("startup")
-async def _startup() -> None:
-    init_telemetry()
-    logger.info("Anvil API server ready")
 
 
 @app.get("/health")

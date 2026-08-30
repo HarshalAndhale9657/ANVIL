@@ -9,9 +9,9 @@ const LAYERS = [
   },
   {
     icon: '⚙',
-    title: 'Celery + Redis Streams',
+    title: 'Async Pipeline + SSE',
     color: '#ff9f1c',
-    desc: 'Async fan-out orchestration. Workers operate in isolated processes with Kafka-like consumer groups and offset replay.'
+    desc: 'Each scan runs as a background asyncio task; live progress streams to the browser over Server-Sent Events through a per-scan in-process queue.'
   },
   {
     icon: '◈',
@@ -69,7 +69,7 @@ export default function Architecture() {
             {[
               { label: 'Webhook', sub: 'FastAPI\nPydantic v2' },
               { label: '→', arrow: true },
-              { label: 'Queue', sub: 'Celery\nRedis' },
+              { label: 'Runner', sub: 'asyncio task\nSSE stream' },
               { label: '→', arrow: true },
               { label: 'Orchestrator', sub: 'Petri Net\nGraph Engine' },
               { label: '→', arrow: true },

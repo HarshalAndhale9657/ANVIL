@@ -111,7 +111,7 @@ export default function HeroSection({ onScrollToDashboard }) {
         </div>
 
         <div className={styles.techStack}>
-          {['FastAPI', 'Redis Streams', 'SQLite WAL', 'Celery', 'LangGraph', 'Omium SDK', 'Pydantic v2', 'Docker'].map(t => (
+          {['FastAPI', 'asyncio + SSE', 'SQLite WAL', 'Colored Petri Net', 'AST Sandbox', 'GPT-4o', 'Omium SDK', 'Pydantic v2'].map(t => (
             <span key={t} className={styles.tech}>{t}</span>
           ))}
         </div>

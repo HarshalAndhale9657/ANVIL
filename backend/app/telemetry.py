@@ -189,12 +189,12 @@ def omium_checkpointed(name: str = None, **kwargs):
     return decorator
 
 
-# ── W3C Trace Context propagation across Celery ─────────────────────────────
+# ── W3C Trace Context propagation across async / thread boundaries ──────────
 
 def inject_trace_context() -> Dict[str, str]:
     """
     Capture the current span context into a carrier dict
-    (W3C traceparent + tracestate) for embedding in Celery task metadata.
+    (W3C traceparent + tracestate) for crossing an async/thread boundary.
     """
     carrier: Dict[str, str] = {}
     _propagator.inject(carrier)
@@ -203,8 +203,8 @@ def inject_trace_context() -> Dict[str, str]:
 
 def extract_trace_context(carrier: Dict[str, str]):
     """
-    Restore span context from a carrier dict received via Celery.
-    Returns a token that must be detached when the task completes.
+    Restore span context from a carrier dict captured on the other side of a
+    boundary. Returns a token that must be detached when the work completes.
     """
     ctx = _propagator.extract(carrier)
     return attach(ctx)

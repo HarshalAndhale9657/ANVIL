@@ -1,14 +1,15 @@
 """
-Pipeline runner — executes the CPN engine in a background thread
-and emits SSE events for real-time frontend updates.
+Pipeline runner — executes the CPN engine in a background asyncio task
+(offloading the blocking CPN run via asyncio.to_thread) and emits SSE
+events for real-time frontend updates.
 
-Replaces the Celery-based task.py for the web app version.
 Each scan gets its own asyncio.Queue for SSE event streaming.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
@@ -52,15 +53,24 @@ omium = _omium_mod if _omium_mod is not None else _OmiumShim()
 logger = logging.getLogger(__name__)
 
 # ── In-memory scan registry ──────────────────────────────────────────────────
-# Maps scan_id → {queue, result, task}
+# Maps scan_id → {queue, result, task, owner, repo_url, created_at}
 
 _scans: Dict[str, dict] = {}
+
+# How long a finished scan's result stays queryable before it is evicted to
+# free memory. The transient queue/task are released immediately on completion.
+_SCAN_TTL_SECONDS = 3600
+
+
+def owner_id(token: str) -> str:
+    """Stable, non-reversible identifier for the owning session token."""
+    return hashlib.sha256((token or "").encode()).hexdigest()
 
 
 def get_scan_queue(scan_id: str) -> Optional[asyncio.Queue]:
     """Get the SSE event queue for a scan."""
     entry = _scans.get(scan_id)
-    return entry["queue"] if entry else None
+    return entry.get("queue") if entry else None
 
 
 def get_scan_result(scan_id: str) -> Optional[ScanResult]:
@@ -69,10 +79,21 @@ def get_scan_result(scan_id: str) -> Optional[ScanResult]:
     return entry.get("result") if entry else None
 
 
-def list_scans() -> list[dict]:
-    """Return a summary of all scans."""
+def get_scan_owner(scan_id: str) -> Optional[str]:
+    """Return the owner_id bound to a scan, or None if unknown."""
+    entry = _scans.get(scan_id)
+    return entry.get("owner") if entry else None
+
+
+def list_scans(owner: Optional[str] = None) -> list[dict]:
+    """
+    Return a summary of scans. If *owner* is given, only that session's scans
+    are returned (prevents one session from seeing every session's scans).
+    """
     results = []
     for scan_id, entry in _scans.items():
+        if owner is not None and entry.get("owner") != owner:
+            continue
         r = entry.get("result")
         results.append({
             "scan_id": scan_id,
@@ -85,6 +106,24 @@ def list_scans() -> list[dict]:
     return results
 
 
+def _schedule_scan_eviction(scan_id: str) -> None:
+    """
+    Release the transient queue/task immediately (the SSE stream has already
+    terminated on completed/failed) and evict the whole entry after a TTL so
+    GET /api/scan/{id} stays answerable for a while, then frees memory.
+    """
+    entry = _scans.get(scan_id)
+    if entry is None:
+        return
+    entry["queue"] = None
+    entry.pop("task", None)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(_SCAN_TTL_SECONDS, lambda: _scans.pop(scan_id, None))
+    except RuntimeError:
+        _scans.pop(scan_id, None)  # no running loop (sync/CLI): evict now
+
+
 # ── Event emitter ────────────────────────────────────────────────────────────
 
 async def _emit(scan_id: str, stage: ScanStage, status: str,
@@ -92,6 +131,17 @@ async def _emit(scan_id: str, stage: ScanStage, status: str,
                 pr_url: str = None, vuln_count: int = None,
                 progress_pct: int = 0):
     """Push a ScanEvent to the scan's SSE queue."""
+    # Keep the progress bar monotonic: an exploit/verify retry emits lower
+    # numbers (e.g. 40/45 after 70), which would otherwise make the frontend
+    # bar jump backward. Never let progress decrease mid-scan; errors still
+    # snap to 100 via their own emit.
+    entry = _scans.get(scan_id)
+    if entry is not None and status != "error":
+        prev = entry.get("max_progress", 0)
+        if progress_pct < prev:
+            progress_pct = prev
+        entry["max_progress"] = progress_pct
+
     event = ScanEvent(
         scan_id=scan_id,
         stage=stage,
@@ -143,6 +193,7 @@ async def run_scan(
                     "queue": asyncio.Queue(),
                     "result": None,
                     "repo_url": repo_url,
+                    "owner": owner_id(token),
                     "created_at": datetime.utcnow().isoformat(),
                 }
 
@@ -247,6 +298,14 @@ async def run_scan(
             _scans[scan_id]["result"] = result
             await _emit(scan_id, ScanStage.FAILED, "error",
                         f"Unexpected error: {exc}", progress_pct=100)
+        finally:
+            # Always reclaim the cloned repo (disk) and schedule the in-memory
+            # scan entry for TTL eviction, on every terminal path.
+            try:
+                cleanup_scan_dir(scan_id)
+            except Exception:
+                logger.warning("Scan dir cleanup failed for %s", scan_id, exc_info=True)
+            _schedule_scan_eviction(scan_id)
 
 
 def start_scan(token: str, repo_url: str, base_branch: str = "main") -> str:
@@ -261,11 +320,13 @@ def start_scan(token: str, repo_url: str, base_branch: str = "main") -> str:
         "queue": queue,
         "result": None,
         "repo_url": repo_url,
+        "owner": owner_id(token),
         "created_at": datetime.utcnow().isoformat(),
     }
 
-    # Fire-and-forget in the event loop
-    loop = asyncio.get_event_loop()
+    # Fire-and-forget in the event loop. start_scan is always called from
+    # within an async request handler, so a running loop is guaranteed.
+    loop = asyncio.get_running_loop()
     task = loop.create_task(run_scan(scan_id, token, repo_url, base_branch))
     _scans[scan_id]["task"] = task
 

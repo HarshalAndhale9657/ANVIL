@@ -35,9 +35,8 @@ An autonomous, fail-closed red-team engine that discovers, exploits, verifies, a
 - [Getting Started](#getting-started)
   - [Prerequisites](#prerequisites)
   - [Step 1 — Configure the Backend](#step-1--configure-the-backend)
-  - [Step 2 — Start Redis](#step-2--start-redis)
-  - [Step 3 — Start the Backend](#step-3--start-the-backend)
-  - [Step 4 — Start the Frontend](#step-4--start-the-frontend)
+  - [Step 2 — Start the Backend](#step-2--start-the-backend)
+  - [Step 3 — Start the Frontend](#step-3--start-the-frontend)
   - [One-Command Launch](#one-command-launch)
 - [API Reference](#api-reference)
 - [Observability and Tracing](#observability-and-tracing)
@@ -266,7 +265,7 @@ This section maps A.E.G.I.S.'s architecture directly to the hackathon evaluation
 | Python 3.11+ (asyncio) | Async pipeline execution via `asyncio.to_thread` |
 | Colored Petri Net Engine | Deterministic multi-agent orchestration (custom) |
 | SQLite (WAL mode) | Durable state checkpoints after every CPN transition |
-| Redis | SSE event queue for real-time streaming |
+| asyncio (background task + per-scan `asyncio.Queue`) | In-process pipeline execution and real-time SSE event streaming |
 | Pydantic v2 | Strict JSON schema enforcement on all inter-agent data |
 | AST Sandbox | Fail-closed code execution with import/call filtering |
 
@@ -317,20 +316,16 @@ anvil/
 |   |   +-- config.py               # Central configuration (env vars)
 |   |   +-- telemetry.py            # Omium/OTLP exporter + W3C propagation
 |   |   +-- github_service.py       # GitHub API: clone, branch, PR
-|   |   +-- celery_app.py           # Celery broker (Redis-backed)
-|   |   +-- state_synchronizer.py   # Redis Stream to SQLite merge daemon
-|   |   +-- tasks.py                # Celery task bridge
 |   |   +-- agents/
 |   |       +-- recon.py            # Agent 1: Source code vulnerability analysis
 |   |       +-- exploiter.py        # Agent 2: Exploit generation + sandbox
 |   |       +-- verifier.py         # Verifier: Deterministic (NO LLM)
 |   |       +-- patcher.py          # Agent 3: Fix generation + GitHub PR
-|   +-- target_app/                  # Intentionally vulnerable Flask server
-|   +-- tests/                       # Sandbox TDD tests (7/7 passing)
+|   +-- tests/                       # Sandbox + verifier + CPN tests (pytest)
 |   +-- requirements.txt            # Python dependencies
 |   +-- .env.example                 # Environment variable template
 |
-+-- start.sh                        # One-command launcher (Redis + backend + frontend)
++-- start.sh                        # One-command launcher (backend + frontend)
 ```
 
 ---
@@ -362,7 +357,6 @@ A.E.G.I.S. enforces security at every layer. If any validation step fails, the s
 |------------|-------|---------|
 | Python 3.11+ | `python3 --version` | [python.org](https://www.python.org/downloads/) |
 | Node.js 20+ | `node --version` | [nodejs.org](https://nodejs.org/) |
-| Redis | `redis-cli ping` | macOS: `brew install redis` / Ubuntu: `sudo apt install redis-server` |
 | OpenAI API Key | — | [platform.openai.com](https://platform.openai.com/api-keys) |
 | GitHub OAuth App | — | [github.com/settings/developers](https://github.com/settings/developers) |
 
@@ -388,28 +382,13 @@ GITHUB_CLIENT_SECRET=your_client_secret
 SESSION_SECRET=run: python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-All other values (Redis URL, SQLite path, Omium endpoint) have sensible defaults.
+All other values (SQLite path, Omium endpoint) have sensible defaults.
 
 > **Tip:** Generate a secure session secret with: `python -c "import secrets; print(secrets.token_hex(32))"`
 
 ---
 
-### Step 2 — Start Redis
-
-```bash
-# macOS / Linux
-redis-server
-
-# Or as a background daemon:
-redis-server --daemonize yes
-
-# Verify:
-redis-cli ping    # Expected output: PONG
-```
-
----
-
-### Step 3 — Start the Backend
+### Step 2 — Start the Backend
 
 ```bash
 cd backend
@@ -427,7 +406,7 @@ The API documentation will be available at: `http://localhost:8000/docs`
 
 ---
 
-### Step 4 — Start the Frontend
+### Step 3 — Start the Frontend
 
 Open a new terminal:
 
@@ -443,7 +422,7 @@ The application will be available at: `http://localhost:5173`
 
 ### One-Command Launch
 
-Alternatively, use the included launcher script that handles Redis, backend, and frontend in one step:
+Alternatively, use the included launcher script that starts the backend and frontend in one step:
 
 ```bash
 chmod +x start.sh

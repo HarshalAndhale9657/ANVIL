@@ -12,7 +12,6 @@ After each transition fires, the state is checkpointed to SQLite.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -179,166 +178,6 @@ class CPNEngine:
             return state
 
 
-# ── Build the Red-Team CPN ───────────────────────────────────────────────────
-
-def build_red_team_cpn() -> CPNEngine:
-    """
-    Construct the full Red-Team CPN with all places, transitions,
-    and deterministic routing logic.
-    """
-    from app.agents.exploiter import run_exploit
-    from app.agents.patcher import run_patch
-    from app.agents.recon import run_recon
-    from app.agents.verifier import verify_exploit
-    from app.config import SANDBOX_MAX_RETRIES
-
-    engine = CPNEngine()
-
-    # ── Places ────────────────────────────────────────────────────────────
-    p_ingress       = engine.add_place("ingress", description="Webhook received")
-    p_recon_ready   = engine.add_place("recon_ready", description="Ready to scan target")
-    p_recon_done    = engine.add_place("recon_done", description="Recon complete")
-    p_exploit_ready = engine.add_place("exploit_ready", description="Ready to exploit")
-    p_exploit_done  = engine.add_place("exploit_done", description="Exploit complete")
-    p_verified      = engine.add_place("verified", description="Exploit verified")
-    p_patch_ready   = engine.add_place("patch_ready", description="Ready to patch")
-    p_patch_done    = engine.add_place("patch_done", terminal=True, description="Patch committed")
-    p_end_safe      = engine.add_place("end_safe", terminal=True, description="No vulnerability found")
-    p_end_error     = engine.add_place("end_error", terminal=True, description="Pipeline failed")
-    p_dead_letter   = engine.add_place("dead_letter", terminal=True, description="Max exploit attempts exceeded — requires human review")
-
-    # ── Transitions ───────────────────────────────────────────────────────
-
-    # T1: Ingress → Recon Ready
-    def t1_action(state: MasterState) -> MasterState:
-        state.current_node = "recon_ready"
-        return state
-
-    engine.add_transition(
-        "t1_start_recon", p_ingress,
-        {"default": p_recon_ready},
-        t1_action,
-    )
-
-    # T2: Recon Ready → Recon Done (runs the Recon Agent)
-    def t2_action(state: MasterState) -> MasterState:
-        try:
-            result = run_recon(state.webhook.target_url)
-            state.recon = result
-            if result.vulnerable_endpoints:
-                logger.info("Recon found %d vulnerabilities, proceeding to exploit",
-                           len(result.vulnerable_endpoints))
-                state.current_node = "exploit_ready"
-            else:
-                logger.info("Recon found no vulnerabilities, ending safely")
-                state.current_node = "end_safe"
-        except Exception as exc:
-            logger.error("Recon failed: %s", exc, exc_info=True)
-            state.error = f"Recon agent failed: {str(exc)}"
-            state.current_node = "end_error"
-        return state
-
-    engine.add_transition(
-        "t2_run_recon", p_recon_ready,
-        {"has_vulns": p_exploit_ready, "no_vulns": p_end_safe, "error": p_end_error},
-        t2_action,
-    )
-
-    # T3: Exploit Ready → Exploit Done (runs the Exploiter Agent)
-    def t3_action(state: MasterState) -> MasterState:
-        try:
-            result = run_exploit(state.recon)
-            state.exploit = result
-            logger.info("Exploit completed: confirmed=%s", result.vulnerability_confirmed)
-            state.current_node = "exploit_done"
-        except Exception as exc:
-            logger.error("Exploit failed: %s", exc, exc_info=True)
-            state.error = f"Exploit agent failed: {str(exc)}"
-            state.current_node = "end_error"
-        return state
-
-    engine.add_transition(
-        "t3_run_exploit", p_exploit_ready,
-        {"done": p_exploit_done, "error": p_end_error},
-        t3_action,
-    )
-
-    # T4: Exploit Done → Verified (runs the Verifier)
-    def t4_action(state: MasterState) -> MasterState:
-        try:
-            result = verify_exploit(state.exploit)
-            state.verification = result
-
-            if result.verified:
-                logger.info("Verification passed: %s", result.reason)
-                state.current_node = "patch_ready"
-            else:
-                # Record the failed attempt for feedback-aware retries
-                if state.exploit:
-                    state.attempt_history.append(AttemptRecord(
-                        attempt_number=state.retry_count + 1,
-                        exploit_code=state.exploit.exploit_payload_used[:2000],
-                        sandbox_stdout=state.exploit.sandbox_stdout[:1000],
-                        failure_reason=result.reason[:500],
-                    ))
-
-                # Retry logic with circuit breaker
-                state.retry_count += 1
-                if state.retry_count > SANDBOX_MAX_RETRIES:
-                    logger.error(
-                        "Max retries (%d) exceeded — routing to dead letter",
-                        SANDBOX_MAX_RETRIES,
-                    )
-                    state.error = (
-                        f"Verification failed after {state.retry_count} retries: "
-                        f"{result.reason}"
-                    )
-                    state.current_node = "dead_letter"
-                else:
-                    logger.warning(
-                        "Verification failed (attempt %d/%d): %s — retrying exploit",
-                        state.retry_count, SANDBOX_MAX_RETRIES, result.reason,
-                    )
-                    state.current_node = "exploit_ready"
-        except Exception as exc:
-            logger.error("Verifier failed: %s", exc, exc_info=True)
-            state.error = f"Verifier failed: {str(exc)}"
-            state.current_node = "end_error"
-        return state
-
-    engine.add_transition(
-        "t4_verify", p_exploit_done,
-        {"verified": p_patch_ready, "retry": p_exploit_ready, "dead_letter": p_dead_letter, "fail": p_end_error},
-        t4_action,
-    )
-
-    # T5: Patch Ready → Patch Done (runs the Patcher Agent)
-    def t5_action(state: MasterState) -> MasterState:
-        try:
-            result = run_patch(
-                state.recon,
-                state.exploit,
-                state.verification,
-                state.trace_id,
-            )
-            state.patch = result
-            logger.info("Patch completed: confidence=%.0f%%", result.confidence_score * 100)
-            state.current_node = "patch_done"
-        except Exception as exc:
-            logger.error("Patch failed: %s", exc, exc_info=True)
-            state.error = f"Patch agent failed: {str(exc)}"
-            state.current_node = "end_error"
-        return state
-
-    engine.add_transition(
-        "t5_run_patch", p_patch_ready,
-        {"done": p_patch_done, "error": p_end_error},
-        t5_action,
-    )
-
-    return engine
-
-
 # ── Build the Web App CPN ────────────────────────────────────────────────────
 
 def build_web_cpn(scan_id: str, emit_fn, loop=None) -> CPNEngine:
@@ -385,6 +224,10 @@ def build_web_cpn(scan_id: str, emit_fn, loop=None) -> CPNEngine:
 
     # ── T1: Ingress → Recon ───────────────────────────────────────────────
     def t1_action(state: MasterState) -> MasterState:
+        # Scope the sandbox signature circuit-breaker to this scan so identical
+        # payloads from previous scans don't pre-trip it.
+        from app.sandbox import reset_circuit_breaker
+        reset_circuit_breaker()
         state.current_node = "recon_ready"
         return state
 
@@ -436,7 +279,8 @@ def build_web_cpn(scan_id: str, emit_fn, loop=None) -> CPNEngine:
                             f"Starting target app ({entry_point}) for live exploit...",
                             progress_pct=42)
 
-            result = run_exploit(state.recon, repo_dir=state.repo_dir, entry_point=entry_point)
+            result = run_exploit(state.recon, repo_dir=state.repo_dir, entry_point=entry_point,
+                                 attempt_history=state.attempt_history)
             state.exploit = result
             logger.info("Exploit completed: confirmed=%s, has_evidence=%s",
                        result.vulnerability_confirmed, bool(result.exploit_evidence))
