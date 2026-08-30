@@ -22,6 +22,16 @@ SQLITE_DB_PATH: str = os.getenv("SQLITE_DB_PATH", "master_state.db")
 SANDBOX_TIMEOUT_SECONDS: int = int(os.getenv("SANDBOX_TIMEOUT_SECONDS", "15"))
 SANDBOX_MAX_RETRIES: int = int(os.getenv("SANDBOX_MAX_RETRIES", "3"))
 
+# ── Patch Validation ──────────────────────────────────────────────────────────
+# When enabled, generated patches must pass the live re-exploit gate (launch the
+# patched app + re-run the exploit) before a PR is opened. Kill switch for
+# environments where launching the target app is not possible.
+LIVE_PATCH_GATE: bool = os.getenv("LIVE_PATCH_GATE", "true").lower() in ("true", "1", "yes")
+
+# How many times the patcher may regenerate a fix, feeding each rejection
+# (ineffective / breaks-startup) back to the model, before giving up (no PR).
+PATCH_MAX_ATTEMPTS: int = int(os.getenv("PATCH_MAX_ATTEMPTS", "3"))
+
 # ── Omium / OpenTelemetry ─────────────────────────────────────────────────────
 OMIUM_API_KEY: str = os.getenv("OMIUM_API_KEY", "")
 OMIUM_ENDPOINT: str = os.getenv(

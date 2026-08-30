@@ -31,7 +31,7 @@ class _OmiumShim:
 omium = _omium_mod if _omium_mod is not None else _OmiumShim()
 from openai import OpenAI
 
-from app.config import LLM_MODEL, LLM_TEMPERATURE, OPENAI_API_KEY
+from app.config import LIVE_PATCH_GATE, LLM_MODEL, LLM_TEMPERATURE, OPENAI_API_KEY, PATCH_MAX_ATTEMPTS
 from app.schemas import ExploitOutput, PatchOutput, ReconOutput, VerificationResult
 from app.telemetry import trace_operation
 
@@ -298,51 +298,100 @@ def run_patch_github(
             f"- Verification: {verification.reason}\n"
         )
 
-        try:
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
-                temperature=LLM_TEMPERATURE,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
+        # Steps 3–3b: generate a fix and validate it, retrying with the
+        # validator's feedback when a patch is ineffective or breaks the app.
+        #   • Static analysis is a fast first filter.
+        #   • The LIVE re-exploit gate is authoritative when it can run: it
+        #     applies the fix to a throwaway copy, relaunches the app, and
+        #     re-runs the original exploit — accepting only if the app still
+        #     starts, serves a benign request, and the exploit no longer works.
+        # Each rejection is fed back to the model for a corrected attempt. If no
+        # attempt yields a valid patch we fail closed (no PR).
+        fixed_code = explanation = None
+        confidence = 0.0
+        validation_label = None
+        feedback = None
+        last_rejection = None
+
+        for attempt in range(1, PATCH_MAX_ATTEMPTS + 1):
+            attempt_prompt = user_prompt
+            if feedback:
+                attempt_prompt += (
+                    "\n\n## Your previous fix was REJECTED — correct it\n"
+                    f"{feedback}\n"
+                    "Return a corrected fix that: keeps the app starting (every import "
+                    "must be valid for the installed library versions), preserves existing "
+                    "behaviour, and actually closes the vulnerability."
+                )
+
+            try:
+                response = client.chat.completions.create(
+                    model=LLM_MODEL,
+                    temperature=LLM_TEMPERATURE,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": attempt_prompt},
+                    ],
+                )
+                raw = json.loads(response.choices[0].message.content)
+                fixed_code = raw["fixed_code"]
+                explanation = raw["explanation"]
+                confidence = float(raw.get("confidence", 0.8))
+                if response.usage:
+                    span.set_attribute(f"llm.attempt{attempt}.prompt_tokens", response.usage.prompt_tokens)
+                    span.set_attribute(f"llm.attempt{attempt}.completion_tokens", response.usage.completion_tokens)
+            except Exception as exc:
+                # LLM/infra failure (not a rejected patch) — fail closed.
+                logger.error("LLM patch generation failed (attempt %d): %s", attempt, exc)
+                span.add_event("llm_patch_failed", attributes={"attempt": attempt, "error": str(exc)})
+                raise RuntimeError(f"Patch generation failed; refusing to open a placebo PR: {exc}")
+
+            # Static gate.
+            static_ok, static_reason = _static_patch_validation(
+                original_code=original_code,
+                fixed_code=fixed_code,
+                exploit_payload=exploit.exploit_payload_used,
+                target_file=target_file,
+                span=span,
             )
+            if not static_ok:
+                last_rejection = f"static analysis: {static_reason}"
+                feedback = f"Reason: {last_rejection}"
+                logger.warning("Patch attempt %d/%d rejected (static): %s", attempt, PATCH_MAX_ATTEMPTS, static_reason)
+                continue
 
-            raw = json.loads(response.choices[0].message.content)
-            fixed_code = raw["fixed_code"]
-            explanation = raw["explanation"]
-            confidence = float(raw.get("confidence", 0.8))
+            # Live re-exploit gate (authoritative when applicable).
+            validation_label = f"Static analysis: {static_reason}"
+            if LIVE_PATCH_GATE:
+                from app.patch_validator import validate_patch_by_reexploit
 
-            span.set_attribute("llm.prompt_tokens", response.usage.prompt_tokens)
-            span.set_attribute("llm.completion_tokens", response.usage.completion_tokens)
-            span.set_attribute("agent.decision_rationale", explanation[:500])
-        except Exception as exc:
-            logger.error("LLM patch generation failed: %s", exc)
-            span.add_event("llm_patch_failed", attributes={"error": str(exc)})
-            # Fail closed. A comment-only "fix" remediates nothing and would
-            # mislead the user; opening a placebo PR is worse than none. Abort
-            # so the pipeline routes to end_error without a PR.
+                live = validate_patch_by_reexploit(
+                    repo_dir=repo_dir,
+                    target_file=target_file,
+                    fixed_code=fixed_code,
+                    exploit_code=exploit.exploit_payload_used,
+                )
+                span.set_attribute(f"regression.attempt{attempt}.live_applicable", live.applicable)
+                span.set_attribute(f"regression.attempt{attempt}.live_reason", live.reason[:200])
+                if live.applicable and not live.valid:
+                    last_rejection = live.reason
+                    feedback = f"Reason: {live.reason}"
+                    logger.warning("Patch attempt %d/%d rejected (live gate): %s", attempt, PATCH_MAX_ATTEMPTS, live.reason)
+                    continue
+                if live.applicable:
+                    validation_label = f"Live re-exploit gate (attempt {attempt}/{PATCH_MAX_ATTEMPTS}): {live.reason}"
+                else:
+                    logger.info("Live re-exploit gate not applicable: %s", live.reason)
+
+            # Accepted.
+            span.set_attribute("patch.attempts", attempt)
+            span.set_attribute("agent.decision_rationale", (explanation or "")[:500])
+            break
+        else:
             raise RuntimeError(
-                f"Patch generation failed; refusing to open a placebo PR: {exc}"
+                f"No valid patch after {PATCH_MAX_ATTEMPTS} attempts. Last rejection: {last_rejection}"
             )
-
-        # Step 3: Validate the patch statically.
-        # In GitHub PR mode ANVIL does not control the running server process —
-        # the target app was started once for the exploit and may still be in
-        # memory with the original code. Re-running the HTTP exploit against that
-        # stale process would always return EXPLOIT_SUCCESS regardless of the fix.
-        # Static analysis is the correct gate here: the PR is for human review.
-        regression_passed, regression_reason = _static_patch_validation(
-            original_code=original_code,
-            fixed_code=fixed_code,
-            exploit_payload=exploit.exploit_payload_used,
-            target_file=target_file,
-            span=span,
-        )
-
-        if not regression_passed:
-            raise RuntimeError(f"Patch validation failed: {regression_reason}")
 
         # Step 4: Build the PR content
         fix_branch = f"anvil/fix-{trace_id[:12]}"
@@ -356,7 +405,7 @@ def run_patch_github(
             f"```\n{exploit.sandbox_stdout[:1000]}\n```\n\n"
             f"## 🩹 Fix Applied\n\n{explanation}\n\n"
             f"## ✅ Patch Validation\n\n"
-            f"Static analysis confirmed: {regression_reason}\n\n"
+            f"{validation_label}\n\n"
             f"**Confidence**: {confidence:.0%}\n"
             f"**Trace ID**: `{trace_id}`\n\n"
             f"---\n"
