@@ -42,9 +42,25 @@ export default function DiffViewer({ patch, visible }) {
     );
   }
 
-  const diff = patch?.unified_diff || '';
+  // Visible but no patch produced (clean repo / failed / partial result):
+  // show an explicit "no patch" state instead of fabricated 97% + 0/0 counts.
+  if (!patch || !patch.unified_diff) {
+    return (
+      <div className={styles.pending}>
+        <div className={styles.pendingIcon}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="32" height="32">
+            <circle cx="12" cy="12" r="10" strokeWidth="1.5"/>
+            <path d="M15 9l-6 6M9 9l6 6" strokeLinecap="round" strokeWidth="1.5"/>
+          </svg>
+        </div>
+        <p>No patch was generated<br/>for this scan</p>
+      </div>
+    );
+  }
+
+  const diff = patch.unified_diff || '';
   const diffLines = parseDiff(diff);
-  const confidence = patch?.confidence_score != null ? Math.round(patch.confidence_score * 100) : 97;
+  const confidence = patch.confidence_score != null ? Math.round(patch.confidence_score * 100) : 0;
   const prUrl = patch?.pr_url;
   const filename = patch?.file_modified || 'server.py';
   const prTitle = patch?.pull_request_title || 'fix(security): patch vulnerability';
@@ -52,7 +68,7 @@ export default function DiffViewer({ patch, visible }) {
   const removedCount = diffLines.filter(l => l.type === 'removed').length;
 
   const handleMerge = () => {
-    if (prUrl) { window.open(prUrl, '_blank', 'noopener noreferrer'); return; }
+    if (prUrl) { window.open(prUrl, '_blank', 'noopener,noreferrer'); return; }
     setMerging(true);
     setTimeout(() => { setMerging(false); setMerged(true); }, 1600);
   };

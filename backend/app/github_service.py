@@ -24,12 +24,12 @@ from typing import Optional
 import httpx
 from github import Github
 
-from app.config import GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
+from app.config import GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, SCAN_TEMP_DIR
 
 logger = logging.getLogger(__name__)
 
-# All scan clones go under this directory (relative to CWD)
-SCAN_TEMP_DIR = os.getenv("SCAN_TEMP_DIR", "scans")
+# All scan clones go under SCAN_TEMP_DIR (single source of truth in app.config,
+# so clone_repo and cleanup_scan_dir can never diverge).
 
 
 # ── URL Parsing ──────────────────────────────────────────────────────────────
@@ -581,9 +581,13 @@ def create_branch_and_pr(
     except Exception as exc:
         # Check if PR already exists
         if "pull request already exists" in str(exc).lower():
-            # Try to find the existing PR
+            # Try to find the existing PR. get_pulls(head=...) REQUIRES the
+            # fully-qualified "owner:branch" form; a bare branch name silently
+            # matches nothing. head_ref is already qualified for fork PRs; for
+            # same-repo PRs we must add the upstream owner.
             try:
-                prs = upstream_repo.get_pulls(state="open", head=head_ref, base=base_branch)
+                qualified_head = head_ref if use_fork else f"{upstream_repo.owner.login}:{_branch}"
+                prs = upstream_repo.get_pulls(state="open", head=qualified_head, base=base_branch)
                 for pr in prs:
                     logger.info("Found existing PR: %s", pr.html_url)
                     return pr.html_url

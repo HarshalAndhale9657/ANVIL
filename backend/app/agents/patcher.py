@@ -1,10 +1,8 @@
 """
-Patcher Agent — generates a code patch to fix the exploited vulnerability
-and creates a Pull Request on the user's GitHub repository.
-
-Supports two modes:
-  1. GITHUB API MODE (web app) — pushes fix via PyGithub API and opens a PR
-  2. LOCAL GIT MODE (legacy) — commits fix to local git repo
+Patcher Agent — generates a code patch that fixes the exploited vulnerability
+and opens a Pull Request on the user's GitHub repository via the GitHub API
+(PyGithub): create a fix branch, commit the patched file(s), and open the PR —
+forking the repo first if the user lacks push access.
 """
 
 from __future__ import annotations
@@ -12,10 +10,6 @@ from __future__ import annotations
 import difflib
 import json
 import logging
-import os
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -37,7 +31,7 @@ class _OmiumShim:
 omium = _omium_mod if _omium_mod is not None else _OmiumShim()
 from openai import OpenAI
 
-from app.config import LLM_MODEL, LLM_TEMPERATURE, OPENAI_API_KEY, TARGET_REPO_DIR
+from app.config import LLM_MODEL, LLM_TEMPERATURE, OPENAI_API_KEY
 from app.schemas import ExploitOutput, PatchOutput, ReconOutput, VerificationResult
 from app.telemetry import trace_operation
 
@@ -53,73 +47,7 @@ def _get_client() -> OpenAI:
     return _client
 
 
-def _run_git(repo_dir: str, *args: str) -> str:
-    """Run a git command in *repo_dir* and return stdout."""
-    result = subprocess.run(
-        ["git", *args],
-        cwd=repo_dir,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr}")
-    return result.stdout.strip()
-
-
 # ── Regression Test ──────────────────────────────────────────────────────────
-
-def _regression_test(
-    original_code: str,
-    fixed_code: str,
-    exploit_payload: str,
-    target_file_path: Path = None,
-    span=None,
-) -> bool:
-    """
-    Live regression test: write the fix, restart the target process, re-run
-    the exploit. Only valid in LOCAL GIT mode where ANVIL controls the server.
-
-    Returns True if the patch is safe (exploit fails against fixed code).
-    Returns False if the exploit still works (patch is bad).
-
-    NOTE: this intentionally re-imports execute_payload at call time so the
-    sandbox module is not loaded unless this function is actually called.
-    """
-    from app.sandbox import execute_payload
-
-    logger.info("Running regression test — re-executing exploit against patched code...")
-
-    wrote_temp = False
-    backup = None
-    if target_file_path and Path(target_file_path).exists():
-        backup = Path(target_file_path).read_text(encoding="utf-8")
-        Path(target_file_path).write_text(fixed_code, encoding="utf-8")
-        wrote_temp = True
-
-    try:
-        success, stdout, stderr = execute_payload(exploit_payload)
-
-        exploit_still_works = success and "EXPLOIT_SUCCESS" in stdout
-
-        if span:
-            span.set_attribute("regression.exploit_rerun_success", success)
-            span.set_attribute("regression.exploit_still_works", exploit_still_works)
-            span.set_attribute("regression.stdout_preview", stdout[:200])
-
-        if exploit_still_works:
-            logger.error(
-                "REGRESSION FAILED: exploit still returns EXPLOIT_SUCCESS. stdout: %s",
-                stdout[:500],
-            )
-            return False
-        else:
-            logger.info("REGRESSION PASSED: exploit no longer succeeds against patched code.")
-            return True
-
-    finally:
-        if wrote_temp and backup is not None:
-            Path(target_file_path).write_text(backup, encoding="utf-8")
 
 
 def _static_patch_validation(
@@ -169,7 +97,6 @@ def _static_patch_validation(
             'f"SELECT',
             "execute(f",
             ".format(",
-            " + ",
         ],
         "command_injection": [
             "os.system(",
@@ -184,25 +111,26 @@ def _static_patch_validation(
         ],
     }
 
+    # Specific security-improvement markers only. Bare tokens like "?", "filter",
+    # "escape", "execute(" appear in ordinary code and would make almost any
+    # change look like a "security improvement", so they are intentionally left
+    # out to keep this gate meaningful.
     SAFE_PATTERNS = [
         # Path safety
         "realpath", "resolve()", "abspath", "normpath",
-        "startswith", "commonpath", "commonprefix",
+        "commonpath", "commonprefix",
         "secure_filename", "safe_join",
         # SQL safety
-        "parameterized", "prepared", "?", ":param",
-        "execute(", "executemany(",
+        "parameterized", "parameterize", "prepared", ":param", "placeholder",
         # Input validation
         "sanitize", "validate", "allowlist", "whitelist",
-        "escape", "filter",
         # Command safety
         "shlex.quote", "shlex.split",
         # Deserialization safety
         "yaml.safe_load", "json.loads",
         # JS/TS safe patterns
-        "path.resolve", "path.normalize", "path.join",
+        "path.resolve", "path.normalize",
         "encodeURIComponent", "escapeHtml", "sanitizeHtml",
-        "parameterize", "prepared", "placeholder",
         "DOMPurify", "helmet", "csurf", "express-validator",
     ]
 
@@ -311,12 +239,25 @@ def run_patch_github(
                 target_file = vuln_path
                 original_code = candidate.read_text(encoding="utf-8")
             else:
-                # Try searching for the file by name
+                # Search by name, but prefer the candidate whose full relative
+                # path matches the reported path. A plain rglob-first-match can
+                # otherwise patch an unrelated file that merely shares a basename
+                # (e.g. utils/config.py when the vuln is in app/config.py).
                 filename = Path(vuln_path).name
-                for fpath in Path(repo_dir).rglob(filename):
-                    target_file = str(fpath.relative_to(repo_dir)).replace("\\", "/")
-                    original_code = fpath.read_text(encoding="utf-8")
-                    break
+                candidates = list(Path(repo_dir).rglob(filename))
+                if candidates:
+                    norm_vuln = vuln_path.replace("\\", "/").lstrip("./")
+
+                    def _rel(p):
+                        return str(p.relative_to(repo_dir)).replace("\\", "/")
+
+                    best = (
+                        next((p for p in candidates if _rel(p) == norm_vuln), None)
+                        or next((p for p in candidates if _rel(p).endswith("/" + norm_vuln)), None)
+                        or min(candidates, key=lambda p: len(_rel(p)))
+                    )
+                    target_file = _rel(best)
+                    original_code = best.read_text(encoding="utf-8")
 
         if not target_file or not original_code:
             raise RuntimeError(
@@ -379,10 +320,12 @@ def run_patch_github(
         except Exception as exc:
             logger.error("LLM patch generation failed: %s", exc)
             span.add_event("llm_patch_failed", attributes={"error": str(exc)})
-            # Deterministic fallback patch that adds safe patterns so it passes static validation
-            fixed_code = original_code + "\n\n# Security Fallback: Added sanitize and validate functions to prevent exploits\n"
-            explanation = "Deterministic fallback patch applied due to LLM generation failure."
-            confidence = 0.5
+            # Fail closed. A comment-only "fix" remediates nothing and would
+            # mislead the user; opening a placebo PR is worse than none. Abort
+            # so the pipeline routes to end_error without a PR.
+            raise RuntimeError(
+                f"Patch generation failed; refusing to open a placebo PR: {exc}"
+            )
 
         # Step 3: Validate the patch statically.
         # In GitHub PR mode ANVIL does not control the running server process —
@@ -460,143 +403,3 @@ def run_patch_github(
         return result
 
 
-# ── Mode 2: Local Git Patch (legacy) ─────────────────────────────────────────
-
-def run_patch(
-    recon: ReconOutput,
-    exploit: ExploitOutput,
-    verification: VerificationResult,
-    trace_id: str,
-) -> PatchOutput:
-    """
-    Generate and apply a patch to fix the exploited vulnerability,
-    then commit it to the target repository.
-    """
-    with trace_operation(
-        "patcher_agent",
-        attributes={
-            "agent.name": "patcher",
-            "agent.mode": "local_git",
-            "agent.target_url": recon.target_url,
-            "agent.trace_id": trace_id,
-        },
-    ) as span:
-        repo_dir = os.path.abspath(TARGET_REPO_DIR)
-
-        # Step 1: create a fix branch
-        branch_name = f"fix/{trace_id[:12]}"
-        try:
-            _run_git(repo_dir, "checkout", "-b", branch_name)
-        except RuntimeError:
-            # Branch might already exist
-            _run_git(repo_dir, "checkout", branch_name)
-
-        # Step 2: read the vulnerable source file
-        target_file = Path(repo_dir) / "server.py"
-        original_code = target_file.read_text(encoding="utf-8")
-
-        # Step 3: ask LLM for the fix
-        client = _get_client()
-
-        system_prompt = (
-            "You are a security patch agent. Given the vulnerable source code and "
-            "the exploit details, generate a fixed version of the code that eliminates "
-            "the vulnerability. Return ONLY valid JSON:\n"
-            "{\n"
-            '  "fixed_code": "<the complete fixed source code>",\n'
-            '  "explanation": "<brief explanation of what was fixed>",\n'
-            '  "confidence": <float 0-1>\n'
-            "}\n"
-            "The fix should:\n"
-            "1. Sanitize user input to prevent the exploit\n"
-            "2. Keep all other functionality intact\n"
-            "3. Use secure coding practices (path canonicalization, input validation)\n"
-        )
-
-        user_prompt = (
-            f"## Vulnerable Code\n```python\n{original_code}\n```\n\n"
-            f"## Exploit Details\n"
-            f"- Vulnerability type: {recon.vulnerable_endpoints[0].injection_vector if recon.vulnerable_endpoints else 'unknown'}\n"
-            f"- Exploit payload:\n```python\n{exploit.exploit_payload_used}\n```\n"
-            f"- Sandbox stdout: {exploit.sandbox_stdout[:500]}\n"
-            f"- Verification: {verification.reason}\n"
-        )
-
-        try:
-            response = client.chat.completions.create(
-                model=LLM_MODEL,
-                temperature=LLM_TEMPERATURE,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-
-            raw = json.loads(response.choices[0].message.content)
-            fixed_code = raw["fixed_code"]
-            explanation = raw["explanation"]
-            confidence = float(raw.get("confidence", 0.8))
-
-            span.set_attribute("llm.prompt_tokens", response.usage.prompt_tokens)
-            span.set_attribute("llm.completion_tokens", response.usage.completion_tokens)
-            span.set_attribute("agent.decision_rationale", explanation[:500])
-        except Exception as exc:
-            logger.error("LLM patch generation failed: %s", exc)
-            span.add_event("llm_patch_failed", attributes={"error": str(exc)})
-            fixed_code = original_code + "\n\n# Security Fallback: Added sanitize and validate functions to prevent exploits\n"
-            explanation = "Deterministic fallback patch applied due to LLM generation failure."
-            confidence = 0.5
-
-        # Step 4: Regression Test — re-run exploit against patched code
-        regression_passed = _regression_test(
-            original_code=original_code,
-            fixed_code=fixed_code,
-            exploit_payload=exploit.exploit_payload_used,
-            target_file_path=target_file,
-            span=span,
-        )
-
-        if not regression_passed:
-            raise RuntimeError(
-                "Regression test FAILED: the original exploit still succeeds "
-                "against the patched code. The fix is insufficient."
-            )
-
-        # Step 5: write the fixed code
-        target_file.write_text(fixed_code, encoding="utf-8")
-        logger.info("Patched %s", target_file)
-
-        # Step 5: generate unified diff
-        diff = _run_git(repo_dir, "diff", "server.py")
-
-        # Step 6: commit the fix
-        pr_title = f"fix: patch {recon.vulnerable_endpoints[0].injection_vector if recon.vulnerable_endpoints else 'vulnerability'} — trace {trace_id[:12]}"
-        pr_body = (
-            f"## Vulnerability Report\n\n"
-            f"**Target**: {recon.target_url}\n"
-            f"**Framework**: {recon.detected_framework}\n"
-            f"**Vector**: {recon.vulnerable_endpoints[0].injection_vector if recon.vulnerable_endpoints else 'N/A'}\n\n"
-            f"## Proof of Exploitation\n\n"
-            f"```\n{exploit.sandbox_stdout[:1000]}\n```\n\n"
-            f"## Fix Applied\n\n{explanation}\n\n"
-            f"**Confidence**: {confidence:.0%}\n"
-            f"**Trace ID**: `{trace_id}`\n"
-        )
-
-        _run_git(repo_dir, "add", "server.py")
-        _run_git(repo_dir, "commit", "-m", pr_title)
-
-        span.set_attribute("patch.branch", branch_name)
-        span.set_attribute("patch.confidence", confidence)
-
-        result = PatchOutput(
-            file_modified="server.py",
-            unified_diff=diff,
-            pull_request_title=pr_title,
-            pull_request_body=pr_body,
-            confidence_score=confidence,
-        )
-
-        logger.info("Patch committed on branch %s (confidence=%.0f%%)", branch_name, confidence * 100)
-        return result

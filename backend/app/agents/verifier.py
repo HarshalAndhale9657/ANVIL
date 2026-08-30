@@ -39,15 +39,17 @@ logger = logging.getLogger(__name__)
 # The single deterministic success marker the Exploiter must print
 _SUCCESS_MARKER = "EXPLOIT_SUCCESS"
 
-# Minimum stdout length (excluding marker) to consider as real evidence
-_MIN_EVIDENCE_LENGTH = 5  # Reduced from 10 to allow short proofs like "500 error"
+# Minimum length of *positive* evidence (excluding marker/failure lines).
+_MIN_EVIDENCE_LENGTH = 5
 
-# Vulnerability types that can have short evidence (e.g., HTTP status codes)
-_SHORT_EVIDENCE_VULN_TYPES = [
-    "500", "error", "crash", "exception", "traceback",
-    "deserialization", "pickle", "yaml", "marshal",
-    "rce", "code execution", "arbitrary code"
-]
+# Lines that indicate a FAILED probe rather than proof of exploitation. These
+# must never be counted as evidence — otherwise a completely failed exploit
+# whose stdout merely contains the word "error" would pass verification.
+_FAILURE_INDICATORS = (
+    "failed", "connection refused", "connection error",
+    "timed out", "timeout", "exploit_failed", "refused",
+    "traceback (most recent call last)",
+)
 
 
 @omium.trace("verifier_agent", span_type="agent")
@@ -105,21 +107,44 @@ def verify_exploit(exploit: ExploitOutput) -> VerificationResult:
                 failure_category="no_marker",
             )
 
-        # ── Check 3: stdout has meaningful evidence beyond the marker ─────
-        # Strip the marker and check if there's real content
-        evidence_text = stdout.replace(_SUCCESS_MARKER, "").strip()
-        
-        # Check if this is a short-evidence vulnerability type (e.g., crash-based)
-        is_short_evidence_type = any(
-            keyword in stdout.lower()
-            for keyword in _SHORT_EVIDENCE_VULN_TYPES
+        # ── Check 3: stdout has meaningful, NON-FAILURE evidence ─────────
+        # A failed exploit often still prints the success marker (buggy LLM
+        # payloads / template tails), so the marker alone is not proof. We
+        # require a POSITIVE proof line AND that the surrounding evidence is
+        # not merely failure/traceback noise.
+        def _is_failure_line(line: str) -> bool:
+            s = line.strip().lower()
+            if not s:
+                return True
+            if line.lstrip().startswith("[-]"):   # template failure prefix
+                return True
+            return any(ind in s for ind in _FAILURE_INDICATORS)
+
+        # Meaningful evidence = non-empty, non-failure lines, excluding the
+        # marker itself and the "EXTRACTED_DATA:" label line.
+        meaningful_lines = [
+            line for line in stdout.replace(_SUCCESS_MARKER, "").splitlines()
+            if line.strip()
+            and not _is_failure_line(line)
+            and not line.strip().lower().startswith("extracted_data:")
+        ]
+        evidence_text = "\n".join(meaningful_lines).strip()
+
+        low = stdout.lower()
+        # A positive proof signal: explicit extracted data, a confirmation
+        # line, or a template "[+]" success prefix.
+        has_positive_proof = (
+            "extracted_data:" in low
+            or "confirmed:" in low
+            or any(line.lstrip().startswith("[+]") for line in stdout.splitlines())
         )
-        
-        # Instead of hard-failing on minimal chars, check multiple signals:
+
+        # Confirmed if there is either an explicit positive-proof marker OR a
+        # real (non-failure) evidence line of sufficient length. Failure-only
+        # and marker-only stdout have neither, so they are rejected.
         exploit_confirmed = (
-            len(evidence_text) > 0 or                              # has extracted data
-            "confirmed" in stdout.lower() or                       # any confirmation word
-            is_short_evidence_type                                 # crash-based evidence
+            has_positive_proof
+            or len(evidence_text) >= _MIN_EVIDENCE_LENGTH
         )
 
         if not exploit_confirmed:

@@ -53,6 +53,17 @@ _COOKIE_SECURE = os.getenv(
     "false"
 ).lower() in ("true", "1", "yes")
 
+# Shared cookie attributes. The SAME attributes must be used when SETTING and
+# when DELETING a cookie, otherwise the browser treats them as different cookies
+# and delete_cookie silently fails (session never clears in cross-origin/HTTPS
+# deployments where samesite=None/secure=True are in effect).
+_COOKIE_KWARGS = {
+    "path": "/",
+    "httponly": True,
+    "samesite": "none" if _COOKIE_SECURE else "lax",
+    "secure": _COOKIE_SECURE,
+}
+
 
 # ────────────────────────────────────────────────────────────────
 # Helpers
@@ -113,9 +124,7 @@ async def github_login():
         key=_STATE_COOKIE_NAME,
         value=_state_signer.dumps(state),
         max_age=_STATE_COOKIE_MAX_AGE,
-        httponly=True,
-        samesite="none" if _COOKIE_SECURE else "lax",
-        secure=_COOKIE_SECURE,
+        **_COOKIE_KWARGS,
     )
 
     return response
@@ -123,10 +132,26 @@ async def github_login():
 
 @router.get("/callback")
 async def github_callback(
-    code: str,
     request: Request,
+    code: str | None = None,
     state: str | None = None,
+    error: str | None = None,
+    error_description: str | None = None,
 ):
+
+    # ─────────────────────────────────────────────
+    # Handle a denied / failed authorization: GitHub redirects here with
+    # ?error=... and no code. Bounce back to the frontend with an error hint
+    # instead of returning a raw 422 for the missing `code` query param.
+    # ─────────────────────────────────────────────
+
+    if error or not code:
+        logger.warning("OAuth callback without code (error=%s): %s", error, error_description)
+        params = urlencode({
+            "auth_error": error or "missing_code",
+            "auth_error_description": error_description or "Authorization was not completed",
+        })
+        return RedirectResponse(url=f"{FRONTEND_URL}?{params}", status_code=302)
 
     # ─────────────────────────────────────────────
     # Validate OAuth state (CSRF protection)
@@ -185,12 +210,10 @@ async def github_callback(
         key=_COOKIE_NAME,
         value=signed,
         max_age=_COOKIE_MAX_AGE,
-        httponly=True,
-        samesite="none" if _COOKIE_SECURE else "lax",
-        secure=_COOKIE_SECURE,
+        **_COOKIE_KWARGS,
     )
 
-    response.delete_cookie(_STATE_COOKIE_NAME)
+    response.delete_cookie(_STATE_COOKIE_NAME, **_COOKIE_KWARGS)
 
     logger.info(
         "GitHub OAuth complete — session cookie set (secure=%s)",
@@ -231,6 +254,6 @@ async def logout():
         "status": "logged_out"
     })
 
-    response.delete_cookie(_COOKIE_NAME)
+    response.delete_cookie(_COOKIE_NAME, **_COOKIE_KWARGS)
 
     return response
