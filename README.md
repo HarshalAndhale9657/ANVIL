@@ -19,6 +19,7 @@ An autonomous, fail-closed red-team engine that discovers, exploits, verifies, a
 
 - [Problem Statement](#problem-statement)
 - [The Solution](#the-solution)
+- [📊 Benchmark Results](#-benchmark-results)
 - [🌟 Powered by Omium AI](#-powered-by-omium-ai)
 - [System Architecture](#system-architecture)
 - [Key Differentiators](#key-differentiators)
@@ -67,7 +68,26 @@ A.E.G.I.S. eliminates all three failure modes through a mathematically grounded 
 - **A dedicated Verifier Agent** (zero LLM dependency) acts as a cryptographic checkpoint: exploit output must contain deterministic proof markers (`FLAG{...}` or `EXPLOIT_SUCCESS`) before the pipeline advances. This is the anti-hallucination gate.
 - **Full W3C Trace Context propagation** via the Omium SDK across every asynchronous boundary (FastAPI to background threads), producing a single connected distributed trace for the entire pipeline. Every decision, every token, every sandbox execution is auditable.
 
-The result: a system that autonomously clones a GitHub repository, scans its source code, generates and executes exploit payloads in a sandboxed environment, deterministically verifies exploitation, generates a security patch, and opens a Pull Request — all visible in real-time through Server-Sent Events streamed to a production-quality web dashboard.
+The result: a system that autonomously clones a GitHub repository, scans its source code, generates and executes exploit payloads in a sandboxed environment, deterministically verifies exploitation, generates a security patch **whose correctness is proven by re-running the exploit against the patched code inside a sealed container**, and opens a Pull Request — all visible in real-time through Server-Sent Events streamed to a production-quality web dashboard.
+
+---
+
+## 📊 Benchmark Results
+
+A.E.G.I.S. ships with an [evaluation harness](backend/evaluation/) that runs the **real pipeline** against a corpus of known-vulnerable apps and scores it against ground truth. First run — 6 vulnerability classes, real GPT-4o pipeline, patches validated by re-running the exploit inside a `--network none` container:
+
+| Metric | Rate | Count |
+|--------|------|-------|
+| **Detected** | **100%** | 6 / 6 |
+| **Exploited** (sandbox-confirmed) | **83%** | 5 / 6 |
+| **Verified** (deterministic gate) | **83%** | 5 / 6 |
+| **Patched** (live re-exploit-validated) | **50%** | 3 / 6 |
+
+Classes: insecure deserialization · path traversal · SQL injection · SSTI/XSS · command injection · SSRF.
+
+The **patch rate is strict on purpose**: a fix counts only if the patched app *still starts* **and** the original exploit *no longer succeeds*, re-checked inside a sealed container. In this run the gate **rejected a generated SSTI patch that imported `flask.escape`** (removed in Flask 2.1 — the app wouldn't even start) which the static check had *passed*, and refused other ineffective fixes: the pipeline ships **no patch rather than a broken one** (fail-closed). A tool reporting "100% patched" on this corpus would be lying — this is the number that is actually true. The lone exploit miss, SSRF, is *detected* but not exploited because proving SSRF impact needs a reachable internal target an offline harness can't provide.
+
+Reproduce: `cd backend && python -m evaluation.run_eval` (add `--no-patch` for the cheaper detection/exploit/verify pass). Full breakdown: [`backend/evaluation/RESULTS.md`](backend/evaluation/RESULTS.md).
 
 ---
 
@@ -153,8 +173,8 @@ POST /api/scan --> Pipeline Runner (asyncio.to_thread)
         |
         v
     [3] Exploit Agent: GPT-4o generates Python exploit payload
-        |               --> AST validation (block dangerous constructs)
-        |               --> Sandboxed subprocess execution (env={}, 5s timeout)
+        |               --> AST validation (block dangerous imports/calls)
+        |               --> Sandboxed subprocess (env allowlist, timeout, per-scan breaker)
         |
         v
     [4] Verifier Agent: Deterministic stdout analysis (NO LLM)
@@ -162,10 +182,15 @@ POST /api/scan --> Pipeline Runner (asyncio.to_thread)
         |     [FAIL] --> Retry (up to 3x) --> back to [3]
         |
         v
-    [5] Patcher Agent: GPT-4o generates security fix
-        |               --> Create fix/ branch via GitHub API
-        |               --> Push patched files
-        |               --> Open Pull Request
+    [5] Patcher Agent: GPT-4o generates security fix, then PROVES it:
+        |   LIVE RE-EXPLOIT GATE — apply the fix to a throwaway copy, relaunch the
+        |   app in a --network none container, re-run the exploit; accept ONLY if
+        |   the app still starts AND the exploit now fails
+        |         |
+        |     [REJECTED] --> feed the failure back to the LLM, regenerate (<=3x);
+        |                    fail-closed (NO PR) if none pass
+        |         |
+        |     [ACCEPTED] --> create fix/ branch, push patched files, open Pull Request
         |
         v
     SSE event: "completed" with PR URL --> Frontend renders results
@@ -203,9 +228,9 @@ stateDiagram-v2
 | Agent | Role | LLM | Key Mechanism |
 |-------|------|-----|---------------|
 | **Recon Agent** | Analyze cloned source code for security vulnerabilities | GPT-4o | Structured JSON output validated against `ReconOutput` schema; deterministic fallback if LLM returns invalid data |
-| **Exploit Agent** | Generate standalone Python exploit payload | GPT-4o | AST-validated sandbox execution with import/call filtering, stripped env, 5s timeout, SHA-256 dedup circuit breaker |
-| **Verifier Agent** | Deterministically confirm exploitation | None | Pure Python — regex matching for `FLAG{...}` and `EXPLOIT_SUCCESS` markers; zero hallucination surface |
-| **Patcher Agent** | Generate security fix and open GitHub PR | GPT-4o | Creates `fix/` branch via GitHub API, pushes patched files, opens PR with vulnerability report and confidence score |
+| **Exploit Agent** | Generate + run a standalone Python exploit | GPT-4o | AST-validated sandbox (import/call filtering, fail-closed env allowlist, timeout, per-scan SHA-256 circuit breaker); deterministic exploit templates as fallback; auto-launches the target app to exploit it live |
+| **Verifier Agent** | Deterministically confirm exploitation | None | Pure Python — requires the `EXPLOIT_SUCCESS` marker **plus real, non-failure evidence**; rejects hallucinated or failed exploits. Zero LLM, zero hallucination surface |
+| **Patcher Agent** | Generate a fix, **prove it**, open a GitHub PR | GPT-4o | Self-correcting: static gate → **live re-exploit gate** (relaunch the patched app in a sealed `--network none` container and re-run the exploit — accept only if it still starts **and** the exploit now fails) → on rejection, feed the failure back and regenerate (≤3 attempts); **fail-closed** (no PR) if none pass. Then create `fix/` branch, push, open PR |
 
 ### SSE Event Lifecycle
 
@@ -311,7 +336,9 @@ anvil/
 |   |   +-- pipeline.py             # Async pipeline runner + event emitter
 |   |   +-- graph.py                 # CPN engine: Places, Transitions, routing
 |   |   +-- sandbox.py              # AST-validated subprocess sandbox
-|   |   +-- schemas.py              # 12 Pydantic v2 data contracts
+|   |   +-- container_runtime.py    # Sealed --network none Docker isolation
+|   |   +-- patch_validator.py      # Live re-exploit gate (host + container)
+|   |   +-- schemas.py              # Pydantic v2 data contracts
 |   |   +-- db.py                    # SQLite WAL checkpointing + execution log
 |   |   +-- config.py               # Central configuration (env vars)
 |   |   +-- telemetry.py            # Omium/OTLP exporter + W3C propagation
@@ -320,8 +347,10 @@ anvil/
 |   |       +-- recon.py            # Agent 1: Source code vulnerability analysis
 |   |       +-- exploiter.py        # Agent 2: Exploit generation + sandbox
 |   |       +-- verifier.py         # Verifier: Deterministic (NO LLM)
-|   |       +-- patcher.py          # Agent 3: Fix generation + GitHub PR
-|   +-- tests/                       # Sandbox + verifier + CPN tests (pytest)
+|   |       +-- patcher.py          # Agent 3: Fix + self-correcting re-exploit gate + PR
+|   +-- docker/anvil-sandbox.Dockerfile  # Sealed sandbox base image
+|   +-- evaluation/                  # Benchmark harness + known-vuln corpus + RESULTS.md
+|   +-- tests/                       # sandbox / verifier / CPN / gate / container / eval (pytest)
 |   +-- requirements.txt            # Python dependencies
 |   +-- .env.example                 # Environment variable template
 |
@@ -338,9 +367,11 @@ A.E.G.I.S. enforces security at every layer. If any validation step fails, the s
 |-------|-----------|---------------|-----------------|
 | Sandbox | AST Import Filtering | Blocks `shutil`, `ctypes`, `subprocess`, `multiprocessing`, `signal`, `importlib` before execution | Dangerous system-level imports in LLM-generated code |
 | Sandbox | AST Call Filtering | Blocks `os.remove`, `os.system`, `os.fork`, `eval`, `exec`, `subprocess.run` | Destructive operations and arbitrary code execution |
-| Sandbox | Stripped Environment | `env={}` passed to `subprocess.run` | Environment variable leakage (API keys, credentials) |
-| Sandbox | Hard Timeout | 5-second `timeout` on subprocess execution | Infinite loops and resource exhaustion |
-| Sandbox | SHA-256 Dedup | Hash-based circuit breaker blocks identical payloads after 3 failures | Retrying the same broken exploit indefinitely |
+| Sandbox | Env Allowlist | Only PATH / TLS / proxy vars forwarded; every secret dropped (fail-closed allowlist) | Environment variable / credential leakage into LLM-generated code |
+| Sandbox | Hard Timeout | Configurable `timeout` on subprocess execution | Infinite loops and resource exhaustion |
+| Sandbox | SHA-256 Dedup | Per-scan hash circuit breaker blocks a payload after repeated failures | Retrying the same broken exploit indefinitely |
+| Patch | Live Re-Exploit Gate | Relaunch the patched app + re-run the exploit; accept only if it still STARTS and the exploit now FAILS | Ineffective or app-breaking patches that static analysis waves through |
+| Isolation | Sealed Container | `--network none` + memory/pid/cpu caps + non-root + ephemeral (host fallback) | Untrusted target/exploit code reaching the host or the internet |
 | CPN | Max Steps | 20-step absolute limit on graph traversal | Infinite state machine loops |
 | CPN | Retry Circuit Breaker | Maximum 3 retries at the verification gate | Exploit-Verify death spiral |
 | Schemas | Pydantic v2 Strict Mode | All inter-agent data validated against typed contracts | Context poisoning and malformed data propagation |
