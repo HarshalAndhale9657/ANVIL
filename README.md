@@ -7,9 +7,12 @@
 
 An autonomous, fail-closed red-team engine that discovers, exploits, verifies, and patches security vulnerabilities — then opens a Pull Request with the fix — all with zero human intervention and full end-to-end observability.
 
+[![CI](https://github.com/HarshalAndhale9657/ANVIL/actions/workflows/ci.yml/badge.svg)](https://github.com/HarshalAndhale9657/ANVIL/actions/workflows/ci.yml)
+&nbsp;·&nbsp; **Benchmark:** 100% detected · 83% exploited+verified · 50% live-validated patch _(6 vuln classes)_
+
 ---
 
-[🌐 Live Demo](https://aegis-frontend-azure.vercel.app) | [🏗️ Architecture](#system-architecture) | [🚀 Getting Started](#getting-started) | [⚙️ How It Works](#how-it-works) | [📚 Research](#research--inspiration)
+[🌐 Live Demo](https://aegis-frontend-azure.vercel.app) | [🏗️ Architecture](#system-architecture) | [🚀 Getting Started](#getting-started) | [📊 Benchmark](#-benchmark-results) | [⚙️ How It Works](#how-it-works) | [📚 Research](#research--inspiration)
 
 ---
 

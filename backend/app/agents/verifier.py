@@ -174,10 +174,17 @@ def verify_exploit(exploit: ExploitOutput) -> VerificationResult:
 
         # ── All checks passed ────────────────────────────────────────────
         has_evidence = bool(exploit.exploit_evidence)
+        # Describe HOW it passed: a positive-proof marker (e.g. EXTRACTED_DATA /
+        # a "[+]" confirmation) vs. a substantial block of extracted evidence —
+        # so the reason never reads as the contradictory "0 chars of evidence".
+        proof = (
+            f"{len(evidence_text)} chars of extracted evidence"
+            if len(evidence_text) >= _MIN_EVIDENCE_LENGTH
+            else "a positive-proof marker"
+        )
         reason = (
-            f"Exploitation verified: stdout contains '{_SUCCESS_MARKER}' "
-            f"with {len(evidence_text)} chars of evidence"
-            + (f" (evidence captured)" if has_evidence else "")
+            f"Exploitation verified: stdout contains '{_SUCCESS_MARKER}' with {proof}"
+            + (" (evidence captured)" if has_evidence else "")
             + "."
         )
         span.set_attribute("verification.result", "VERIFIED")
