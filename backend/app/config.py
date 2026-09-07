@@ -32,6 +32,14 @@ LIVE_PATCH_GATE: bool = os.getenv("LIVE_PATCH_GATE", "true").lower() in ("true",
 # (ineffective / breaks-startup) back to the model, before giving up (no PR).
 PATCH_MAX_ATTEMPTS: int = int(os.getenv("PATCH_MAX_ATTEMPTS", "3"))
 
+# ── Agentic exploit ───────────────────────────────────────────────────────────
+# When on, the exploiter uses a tool-using loop (probe the live target via HTTP /
+# read source, observe, refine) to generate the exploit, instead of one-shot
+# prompting. It still emits a standalone script run in the AST sandbox, so the
+# verify/patch contract is unchanged. Off by default (extra LLM calls per scan).
+AGENTIC_EXPLOIT: bool = os.getenv("AGENTIC_EXPLOIT", "false").lower() in ("true", "1", "yes")
+AGENTIC_EXPLOIT_MAX_STEPS: int = int(os.getenv("AGENTIC_EXPLOIT_MAX_STEPS", "8"))
+
 # ── Omium / OpenTelemetry ─────────────────────────────────────────────────────
 OMIUM_API_KEY: str = os.getenv("OMIUM_API_KEY", "")
 OMIUM_ENDPOINT: str = os.getenv(
