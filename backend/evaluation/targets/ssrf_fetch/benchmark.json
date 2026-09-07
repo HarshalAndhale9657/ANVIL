@@ -1,0 +1,13 @@
+{
+  "name": "ssrf_fetch",
+  "framework": "Flask",
+  "entry_point": "app.py",
+  "known_vulnerabilities": [
+    {
+      "type": "ssrf",
+      "file": "app.py",
+      "endpoint": "/api/proxy",
+      "exploitable": true
+    }
+  ]
+}

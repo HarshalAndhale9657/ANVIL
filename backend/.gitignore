@@ -28,5 +28,8 @@ Thumbs.db
 # Scan workspace (cloned repos)
 scans/
 
+# Benchmark run artifacts (per-run reports + partial results; commit a report explicitly with -f)
+evaluation/results/
+
 # Temp files
 *.tmp

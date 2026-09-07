@@ -234,7 +234,45 @@ def discover_targets(targets_root) -> List[TargetSpec]:
     return specs
 
 
-def run_suite(targets_root, *, do_patch: bool = True, **fns) -> tuple[List[TargetResult], SuiteMetrics]:
+def run_suite(targets_root, *, do_patch: bool = True, results_dir=None, **fns) -> tuple[List[TargetResult], SuiteMetrics]:
+    """Run every discovered target. If results_dir is given, each target's
+    result is written to <results_dir>/partial/<name>.json as it completes, so
+    an interrupted run keeps its partial results (see load_partials)."""
+    import json as _json
+
     specs = discover_targets(targets_root)
-    results = [run_target(s, do_patch=do_patch, **fns) for s in specs]
+    partial_dir = None
+    if results_dir:
+        partial_dir = Path(results_dir) / "partial"
+        partial_dir.mkdir(parents=True, exist_ok=True)
+
+    results: List[TargetResult] = []
+    for i, s in enumerate(specs, 1):
+        logger.info("[%d/%d] target: %s", i, len(specs), s.name)
+        r = run_target(s, do_patch=do_patch, **fns)
+        results.append(r)
+        if partial_dir:
+            (partial_dir / f"{r.name}.json").write_text(
+                _json.dumps(_result_to_dict(r), indent=2), encoding="utf-8")
     return results, aggregate(results)
+
+
+def _result_to_dict(r: TargetResult) -> dict:
+    from dataclasses import asdict
+    return asdict(r)
+
+
+def load_partials(results_dir) -> List[TargetResult]:
+    """Rebuild TargetResults from per-target JSONs written during a run — lets a
+    report be assembled after an interruption."""
+    import json as _json
+
+    partial_dir = Path(results_dir) / "partial"
+    out: List[TargetResult] = []
+    if partial_dir.is_dir():
+        for f in sorted(partial_dir.glob("*.json")):
+            try:
+                out.append(TargetResult(**_json.loads(f.read_text(encoding="utf-8"))))
+            except Exception as exc:
+                logger.warning("skip partial %s: %s", f, exc)
+    return out

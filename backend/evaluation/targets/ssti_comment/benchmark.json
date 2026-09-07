@@ -1,0 +1,13 @@
+{
+  "name": "ssti_comment",
+  "framework": "Flask",
+  "entry_point": "app.py",
+  "known_vulnerabilities": [
+    {
+      "type": "xss",
+      "file": "app.py",
+      "endpoint": "/api/comment",
+      "exploitable": true
+    }
+  ]
+}
