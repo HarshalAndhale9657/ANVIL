@@ -32,9 +32,10 @@ def main() -> None:
     for noisy in ("httpx", "httpcore", "openai", "urllib3", "werkzeug"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
-    results, metrics = run_suite(args.targets, do_patch=not args.no_patch, results_dir=args.out)
-    print("\n" + to_markdown(results, metrics))
-    json_path, md_path = write_report(results, metrics, args.out)
+    patch_evaluated = not args.no_patch
+    results, metrics = run_suite(args.targets, do_patch=patch_evaluated, results_dir=args.out)
+    print("\n" + to_markdown(results, metrics, patch_evaluated=patch_evaluated))
+    json_path, md_path = write_report(results, metrics, args.out, patch_evaluated=patch_evaluated)
     print(f"\nWrote: {json_path}\n       {md_path}")
 
 
