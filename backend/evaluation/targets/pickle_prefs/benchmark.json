@@ -1,0 +1,13 @@
+{
+  "name": "pickle_prefs",
+  "framework": "Flask",
+  "entry_point": "app.py",
+  "known_vulnerabilities": [
+    {
+      "type": "insecure_deserialization",
+      "file": "app.py",
+      "endpoint": "/api/v1/user/preferences",
+      "exploitable": true
+    }
+  ]
+}
