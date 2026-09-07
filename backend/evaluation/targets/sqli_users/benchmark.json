@@ -1,0 +1,13 @@
+{
+  "name": "sqli_users",
+  "framework": "Flask",
+  "entry_point": "app.py",
+  "known_vulnerabilities": [
+    {
+      "type": "sql_injection",
+      "file": "app.py",
+      "endpoint": "/api/users",
+      "exploitable": true
+    }
+  ]
+}

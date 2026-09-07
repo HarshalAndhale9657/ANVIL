@@ -114,7 +114,7 @@ def test_good_patch_is_accepted(tmp_path):
     repo = _write_target(tmp_path)
     res = validate_patch_by_reexploit(
         repo_dir=repo, target_file="app.py", fixed_code=GOOD_PATCH,
-        exploit_code=EXPLOIT, startup_timeout=_TIMEOUT,
+        exploit_code=EXPLOIT, startup_timeout=_TIMEOUT, prefer_container=False,
     )
     assert res.applicable, res.reason
     assert res.valid is True, res.reason
@@ -125,7 +125,7 @@ def test_broken_patch_is_rejected(tmp_path):
     repo = _write_target(tmp_path)
     res = validate_patch_by_reexploit(
         repo_dir=repo, target_file="app.py", fixed_code=BROKEN_PATCH,
-        exploit_code=EXPLOIT, startup_timeout=_TIMEOUT,
+        exploit_code=EXPLOIT, startup_timeout=_TIMEOUT, prefer_container=False,
     )
     assert res.applicable, res.reason
     assert res.valid is False
@@ -139,7 +139,7 @@ def test_ineffective_patch_is_rejected(tmp_path):
     repo = _write_target(tmp_path)
     res = validate_patch_by_reexploit(
         repo_dir=repo, target_file="app.py", fixed_code=VULN_APP,  # unchanged
-        exploit_code=EXPLOIT, startup_timeout=_TIMEOUT,
+        exploit_code=EXPLOIT, startup_timeout=_TIMEOUT, prefer_container=False,
     )
     assert res.applicable, res.reason
     assert res.valid is False

@@ -1,0 +1,13 @@
+{
+  "name": "path_traversal",
+  "framework": "Flask",
+  "entry_point": "app.py",
+  "known_vulnerabilities": [
+    {
+      "type": "path_traversal",
+      "file": "app.py",
+      "endpoint": "/files/<path:filename>",
+      "exploitable": true
+    }
+  ]
+}

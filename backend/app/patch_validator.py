@@ -209,6 +209,57 @@ def _exploit_succeeds(port: int, exploit_code: str) -> bool:
     return _SUCCESS_MARKER in stdout
 
 
+# ── Container-based gate (preferred when Docker is available) ─────────────────
+
+def _validate_via_container(*, repo_dir, target_file, fixed_code, exploit_code, entry_point) -> PatchValidation:
+    """Run the baseline→patched re-exploit protocol inside sealed containers.
+
+    Returns applicable=False (inconclusive) when the container can't reproduce
+    the baseline, so the caller falls back to the host path — we never reject a
+    patch on a harness/environment problem.
+    """
+    from app.container_runtime import run_app_and_exploit_sealed
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="anvil_patchval_c_"))
+    repo_copy = tmp_root / "repo"
+    try:
+        shutil.copytree(repo_dir, repo_copy, ignore=_COPY_IGNORE, dirs_exist_ok=True)
+        target_path = repo_copy / target_file
+        if not target_path.exists():
+            return PatchValidation(False, None, f"Target file '{target_file}' not present in the workspace copy.")
+
+        # BASELINE: the exploit must reproduce against the UNPATCHED copy.
+        base = run_app_and_exploit_sealed(
+            repo_dir=str(repo_copy), entry_point=entry_point, exploit_code=exploit_code)
+        if not base.available:
+            return PatchValidation(False, None, "Container isolation unavailable — host fallback.")
+        if not base.app_started:
+            return PatchValidation(False, None, "Baseline app did not start in the container — inconclusive (host fallback).")
+        if not base.exploit_succeeded:
+            return PatchValidation(False, None, "Baseline exploit did not reproduce in the container — inconclusive (host fallback).")
+
+        # PATCHED: apply the fix and re-test in a fresh sealed container.
+        target_path.write_text(fixed_code, encoding="utf-8")
+        patched = run_app_and_exploit_sealed(
+            repo_dir=str(repo_copy), entry_point=entry_point, exploit_code=exploit_code)
+        if not patched.available:
+            return PatchValidation(False, None, "Container isolation unavailable — host fallback.")
+        if not patched.app_started:
+            detail = f" Startup error: {patched.error}" if patched.error else ""
+            return PatchValidation(
+                True, False,
+                f"[sealed container] Patched app failed to start — the patch breaks the application.{detail}")
+        if patched.exploit_succeeded:
+            return PatchValidation(
+                True, False,
+                "[sealed container] Exploit STILL succeeds against the patched app — the fix is ineffective.")
+        return PatchValidation(
+            True, True,
+            "[sealed container] Patch validated: app starts and the original exploit no longer succeeds (network-isolated).")
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
 # ── The gate ──────────────────────────────────────────────────────────────────
 
 def validate_patch_by_reexploit(
@@ -219,11 +270,14 @@ def validate_patch_by_reexploit(
     exploit_code: str,
     benign_path: str = "/",
     startup_timeout: int = 12,
+    prefer_container: bool = True,
 ) -> PatchValidation:
     """Validate *fixed_code* for *target_file* by re-running *exploit_code*.
 
-    Follows the baseline→patched protocol in the module docstring. Never raises
-    for an expected condition — returns a PatchValidation the caller can act on.
+    Follows the baseline→patched protocol in the module docstring. Runs the
+    app+exploit inside a sealed Docker container when one is available
+    (prefer_container, the default), falling back to host subprocesses when it
+    isn't. Never raises for an expected condition — returns a PatchValidation.
     """
     from app.github_service import detect_entry_point
 
@@ -232,6 +286,22 @@ def validate_patch_by_reexploit(
         return PatchValidation(False, None, "No launchable entry point — live re-exploit gate not applicable.")
     if not _looks_like_http_exploit(exploit_code):
         return PatchValidation(False, None, "Original exploit is not an HTTP exploit — live re-exploit gate not applicable.")
+
+    # Prefer sealed-container isolation when Docker can actually run one; a
+    # definitive verdict is returned, otherwise we fall through to the host path.
+    if prefer_container:
+        try:
+            from app.container_runtime import container_isolation_available
+            if container_isolation_available():
+                cres = _validate_via_container(
+                    repo_dir=repo_dir, target_file=target_file,
+                    fixed_code=fixed_code, exploit_code=exploit_code, entry_point=entry_point,
+                )
+                if cres.applicable:
+                    return cres
+                logger.info("Container gate inconclusive (%s); falling back to host.", cres.reason)
+        except Exception as exc:
+            logger.warning("Container gate errored (%s); falling back to host.", exc, exc_info=True)
 
     tmp_root = Path(tempfile.mkdtemp(prefix="anvil_patchval_"))
     repo_copy = tmp_root / "repo"
