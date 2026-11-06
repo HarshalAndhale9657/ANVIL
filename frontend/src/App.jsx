@@ -93,6 +93,7 @@ export default function App() {
                 user={user} loading={authLoading} slow={authSlow}
                 authError={authError} onDismissError={clearAuthError}
                 onLogin={login} onLogout={logout}
+                scope={config?.oauth_scope}
               />
             </div>
           </div>

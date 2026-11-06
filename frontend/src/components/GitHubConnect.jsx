@@ -1,7 +1,7 @@
 import styles from './GitHubConnect.module.css';
 
 export default function GitHubConnect({
-  user, loading, slow, authError, onDismissError, onLogin, onLogout,
+  user, loading, slow, authError, onDismissError, onLogin, onLogout, scope,
 }) {
   if (loading) {
     return (
@@ -64,7 +64,7 @@ export default function GitHubConnect({
         </div>
         <div className={styles.noticeText}>
           <strong>GitHub Authentication Required</strong>
-          <span>A.E.G.I.S. needs repo access to clone, scan, and open a Pull Request with the fix.</span>
+          <span>A.E.G.I.S. needs GitHub access to clone the target, scan it, and open a Pull Request with the fix.</span>
         </div>
       </div>
       <button className={styles.connectBtn} onClick={onLogin}>
@@ -77,9 +77,20 @@ export default function GitHubConnect({
         </svg>
       </button>
       <p className={styles.scopeNote}>
-        Requests the <code>repo</code> scope to clone the repository and open the fix
-        Pull Request. Your token is kept in an encrypted, HttpOnly session cookie and
-        is never stored server-side.
+        {scope === 'public_repo' ? (
+          <>
+            Requests the <code>public_repo</code> scope: <strong>public repositories
+            only</strong>, to clone the target and open the fix Pull Request. It cannot
+            read private repositories.
+          </>
+        ) : (
+          <>
+            Requests the <code>repo</code> scope to clone the repository and open the fix
+            Pull Request.
+          </>
+        )}{' '}
+        Your token is kept in an encrypted, HttpOnly session cookie and is never
+        stored server-side.
       </p>
     </div>
   );

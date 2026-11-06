@@ -20,6 +20,7 @@ from app.auth import require_auth
 from app.config import (
     ALLOW_UPSTREAM_PRS,
     DEMO_REPO_URL,
+    GITHUB_OAUTH_SCOPE,
     MAX_ACTIVE_SCANS_PER_USER,
     MAX_SCANS_PER_USER_PER_DAY,
     SCAN_ALLOWED_OWNERS,
@@ -56,6 +57,7 @@ async def public_config():
         "demo_repo_url": DEMO_REPO_URL or None,
         "allowed_owners": SCAN_ALLOWED_OWNERS,
         "upstream_prs": ALLOW_UPSTREAM_PRS,
+        "oauth_scope": GITHUB_OAUTH_SCOPE,
         "limits": {
             "active_scans_per_user": MAX_ACTIVE_SCANS_PER_USER,
             "scans_per_user_per_day": MAX_SCANS_PER_USER_PER_DAY or None,

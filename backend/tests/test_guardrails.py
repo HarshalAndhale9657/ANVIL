@@ -209,7 +209,8 @@ def test_public_config_endpoint(client):
     r = client.get("/api/config")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) >= {"demo_repo_url", "allowed_owners", "upstream_prs", "limits"}
+    assert set(body) >= {"demo_repo_url", "allowed_owners", "upstream_prs", "oauth_scope", "limits"}
+    assert body["oauth_scope"] in ("repo", "public_repo")
 
 
 def test_api_health(client):

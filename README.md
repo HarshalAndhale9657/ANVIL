@@ -521,6 +521,7 @@ Firefox, Brave and every private window block, and then login silently fails.
 
 | Variable | Production value | Why |
 |---|---|---|
+| `GITHUB_OAUTH_SCOPE` | `public_repo` | least privilege: the demo scans public repos only, so the token can't read private code (default `repo` for local use) |
 | `COOKIE_SECURE` / `COOKIE_SAMESITE` | `true` / `lax` | HTTPS-only first-party cookie; startup refuses the placeholder `SESSION_SECRET` |
 | `SCAN_ALLOWED_OWNERS` | your account (add `,@self` to allow users' own repos, `*` for any) | scans execute the target's code |
 | `ALLOW_UPSTREAM_PRS` | `false` | without push access, PRs stay in the user's fork |

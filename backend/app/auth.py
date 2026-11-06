@@ -27,6 +27,7 @@ from app.config import (
     COOKIE_SECURE,
     FRONTEND_URL,
     GITHUB_CLIENT_ID,
+    GITHUB_OAUTH_SCOPE,
     GITHUB_REDIRECT_URI,
     SESSION_SECRET,
 )
@@ -44,7 +45,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 # Cookie / Session Config
 # ────────────────────────────────────────────────────────────────
 
-# The session cookie carries the user's GitHub OAuth token (repo scope). It is
+# The session cookie carries the user's GitHub OAuth token (GITHUB_OAUTH_SCOPE). It is
 # ENCRYPTED (Fernet: AES-128-CBC + HMAC-SHA256), not merely signed — a signed
 # cookie is just base64, so the token would be readable by anything that ever
 # sees the cookie value (logs, proxies, browser extensions).
@@ -126,7 +127,7 @@ async def github_login():
     params = urlencode({
         "client_id": GITHUB_CLIENT_ID,
         "redirect_uri": GITHUB_REDIRECT_URI,
-        "scope": "repo",
+        "scope": GITHUB_OAUTH_SCOPE,
         "state": state,
     })
 

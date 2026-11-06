@@ -33,6 +33,10 @@ services:
       # Production GitHub OAuth App; its callback must equal GITHUB_REDIRECT_URI.
       - key: GITHUB_CLIENT_ID
         value: Ov23li4XOcXnabXrZK4Q
+      # Least privilege: the public demo only scans public repos, so the login
+      # asks for public_repo — the token can never read private code.
+      - key: GITHUB_OAUTH_SCOPE
+        value: public_repo
 
       # ── URLs: the public frontend origin (API is served under it via proxy) ─
       - key: FRONTEND_URL

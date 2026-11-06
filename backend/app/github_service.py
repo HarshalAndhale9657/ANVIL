@@ -25,7 +25,13 @@ from typing import Optional
 import httpx
 from github import Github
 
-from app.config import ALLOW_UPSTREAM_PRS, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, SCAN_TEMP_DIR
+from app.config import (
+    ALLOW_UPSTREAM_PRS,
+    GITHUB_CLIENT_ID,
+    GITHUB_CLIENT_SECRET,
+    GITHUB_OAUTH_SCOPE,
+    SCAN_TEMP_DIR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +106,11 @@ def clone_repo(token: str, repo_url: str, scan_id: str) -> str:
     )
     if result.returncode != 0:
         stderr = (result.stderr or "").replace(token, "***").replace(basic, "***")
+        if GITHUB_OAUTH_SCOPE == "public_repo" and "not found" in stderr.lower():
+            raise RuntimeError(
+                "git clone failed: repository not found. This deployment only has "
+                "access to public repositories (OAuth scope public_repo)."
+            )
         raise RuntimeError(f"git clone failed: {stderr.strip()}")
 
     repo_dir = str(repo_path)

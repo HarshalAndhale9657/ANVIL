@@ -92,6 +92,13 @@ def test_me_rejects_tampered_cookie(client):
     assert client.get("/api/auth/me").status_code == 401
 
 
+def test_login_requests_configured_scope(client, monkeypatch):
+    monkeypatch.setattr(auth, "GITHUB_OAUTH_SCOPE", "public_repo")
+    r = client.get("/api/auth/github")
+    q = parse_qs(urlparse(r.headers["location"]).query)
+    assert q["scope"] == ["public_repo"]
+
+
 def test_callback_with_non_ascii_state_is_rejected_not_500(client):
     _login(client)
     r = client.get("/api/auth/callback", params={"code": "x", "state": "é漢"})

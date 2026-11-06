@@ -132,6 +132,19 @@ def test_clone_error_message_redacts_token(tmp_path, monkeypatch):
     assert token not in str(exc.value)
 
 
+def test_clone_not_found_explains_public_only_scope(tmp_path, monkeypatch):
+    import app.github_service as gs
+
+    def not_found(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 128, "", "remote: Repository not found.")
+
+    monkeypatch.setattr(gs, "SCAN_TEMP_DIR", str(tmp_path))
+    monkeypatch.setattr(gs.subprocess, "run", not_found)
+    monkeypatch.setattr(gs, "GITHUB_OAUTH_SCOPE", "public_repo")
+    with pytest.raises(RuntimeError, match="only has access to public repositories"):
+        gs.clone_repo("gho_x", "https://github.com/o/private-one", "scan789")
+
+
 def test_checkpoints_never_serialise_github_token():
     """State is checkpointed to SQLite after every CPN transition; the user's
     GitHub token must never be part of that serialisation."""

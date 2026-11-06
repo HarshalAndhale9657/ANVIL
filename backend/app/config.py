@@ -59,6 +59,12 @@ GITHUB_CLIENT_SECRET: str = os.getenv("GITHUB_CLIENT_SECRET", "")
 GITHUB_REDIRECT_URI: str = os.getenv(
     "GITHUB_REDIRECT_URI", "http://localhost:8000/api/auth/callback"
 )
+# OAuth scope requested at login. "repo" (default) covers private repositories
+# and suits local use; a public demo that only scans public repos should use
+# "public_repo", so the token can never read anyone's private code.
+GITHUB_OAUTH_SCOPE: str = os.getenv("GITHUB_OAUTH_SCOPE", "repo").strip()
+if GITHUB_OAUTH_SCOPE not in ("repo", "public_repo"):
+    raise ValueError(f"GITHUB_OAUTH_SCOPE must be repo|public_repo, got {GITHUB_OAUTH_SCOPE!r}")
 
 # ── Session / Security ───────────────────────────────────────────────────────
 _DEFAULT_SESSION_SECRET = "change-me-in-production-32bytes!"
