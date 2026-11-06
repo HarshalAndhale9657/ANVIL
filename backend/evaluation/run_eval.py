@@ -13,6 +13,7 @@ patch gate when available; costs a little OpenAI credit per target.
 from __future__ import annotations
 
 import argparse
+import sys
 import logging
 from pathlib import Path
 
@@ -27,6 +28,12 @@ def main() -> None:
     ap.add_argument("--out", default=str(here / "results"), help="report output dir")
     ap.add_argument("--no-patch", action="store_true", help="skip the patch stage")
     args = ap.parse_args()
+
+    # The report contains ✅/— etc.; don't crash on a legacy console codepage
+    # (e.g. cp1252 on Windows or output redirected to a file).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     for noisy in ("httpx", "httpcore", "openai", "urllib3", "werkzeug"):

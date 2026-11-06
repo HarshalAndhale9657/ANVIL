@@ -8,11 +8,12 @@ between agents.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ── Webhook Ingress ──────────────────────────────────────────────────────────
@@ -25,7 +26,11 @@ class WebhookPayload(BaseModel):
     auth_signature: Optional[str] = Field(None, description="HMAC signature for payload integrity")
     # Web-app pipeline additions (populated by pipeline.py, not from external webhooks)
     repo_name: Optional[str] = Field(None, description="'owner/repo' short name, e.g. 'DevOpsDreamer/ANVIL'")
-    github_token: Optional[str] = Field(None, description="OAuth token used for cloning and PR creation")
+    # exclude=True: never serialised (state is checkpointed to SQLite after every
+    # CPN transition; a token on disk is readable by the scanned repo's code).
+    github_token: Optional[str] = Field(
+        None, exclude=True, repr=False, description="OAuth token used for cloning and PR creation"
+    )
     base_branch: str = Field("main", description="Branch to scan and base the fix PR against")
 
 
@@ -187,16 +192,52 @@ class MasterState(BaseModel):
     # Web-app additions
     repo_url: Optional[str] = None
     repo_dir: Optional[str] = None
-    github_token: Optional[str] = None
+    # In-memory only — excluded from model_dump()/JSON so checkpoints and logs
+    # never contain the user's GitHub token.
+    github_token: Optional[str] = Field(None, exclude=True, repr=False)
     base_branch: str = "main"
 
 
 # ── Web App Schemas ──────────────────────────────────────────────────────────
 
+# GitHub owner: 1-39 alnum/hyphen. Repo: 1-100 of alnum . _ -  (no "..").
+_REPO_URL_RE = re.compile(
+    r"^https?://(?:www\.)?github\.com/"
+    r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/"
+    r"(?P<repo>[A-Za-z0-9._-]{1,100}?)(?:\.git)?/?$"
+)
+# Conservative git ref name: path-like segments of safe characters.
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+
+
 class ScanRequest(BaseModel):
-    """Request body for POST /api/scan."""
+    """Request body for POST /api/scan. Validated at the edge so malformed
+    input is a 422 here, not a failure halfway through a scan."""
     repo_url: str = Field(..., description="GitHub repo URL, e.g. https://github.com/user/repo")
     base_branch: str = Field("main", description="Branch to scan and base the fix PR against")
+
+    @field_validator("repo_url")
+    @classmethod
+    def _normalise_repo_url(cls, v: str) -> str:
+        m = _REPO_URL_RE.match((v or "").strip())
+        if not m or m.group("repo") in (".", "..") or ".." in m.group("repo"):
+            raise ValueError("must be a GitHub repository URL like https://github.com/owner/repo")
+        return f"https://github.com/{m.group('owner')}/{m.group('repo')}"
+
+    @field_validator("base_branch")
+    @classmethod
+    def _validate_branch(cls, v: str) -> str:
+        v = (v or "").strip()
+        if (
+            not v or len(v) > 100 or not _BRANCH_RE.match(v) or v.startswith("-")
+            or ".." in v or v.endswith(".lock") or v.endswith(".")
+        ):
+            raise ValueError("invalid branch name")
+        return v
+
+    @property
+    def repo_owner(self) -> str:
+        return self.repo_url.rsplit("/", 2)[-2]
 
 
 class ScanStage(str, Enum):

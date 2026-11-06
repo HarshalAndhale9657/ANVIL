@@ -99,9 +99,7 @@ export function useScan() {
     setPetriStage('idle');
 
     addLog('▶ A.E.G.I.S. v2.0.0 — Autonomous Exploit Generation and Intelligent Security', 'system');
-    addLog(`▶ Omium trace initialized — W3C Trace Context propagation active`, 'system');
-    addLog(`▶ Async pipeline runner started. SQLite WAL checkpoint active.`, 'system');
-    addLog(`⚡ [WEBHOOK] POST /api/scan — repo: ${url}`, 'event');
+    addLog(`⚡ POST /api/scan — repo: ${url}`, 'event');
 
     try {
       const resp = await startScan(url, baseBranch);
@@ -217,8 +215,11 @@ export function useScan() {
         },
       );
     } catch (err) {
-      addLog(`✗ Failed to start scan: ${err.message}`, 'warn');
-      setError(err.message);
+      const msg = err.code === 401
+        ? 'Your GitHub session expired. Please reconnect GitHub (Step 1).'
+        : err.message;
+      addLog(`✗ Scan not started: ${msg}`, 'warn');
+      setError(msg);
       setPhaseTracked('failed');
     }
   }, [addLog, setPhaseTracked]);

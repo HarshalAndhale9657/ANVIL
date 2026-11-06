@@ -166,6 +166,7 @@ async def run_scan(
     token: str,
     repo_url: str,
     base_branch: str = "main",
+    user_key: Optional[str] = None,
 ) -> None:
     """
     Full scan pipeline:
@@ -306,9 +307,14 @@ async def run_scan(
             except Exception:
                 logger.warning("Scan dir cleanup failed for %s", scan_id, exc_info=True)
             _schedule_scan_eviction(scan_id)
+            # Free the user's concurrency slot (admission control in api.py).
+            if user_key is not None:
+                from app.guardrails import scan_limiter
+                scan_limiter.release(user_key)
 
 
-def start_scan(token: str, repo_url: str, base_branch: str = "main") -> str:
+def start_scan(token: str, repo_url: str, base_branch: str = "main",
+               user_key: Optional[str] = None) -> str:
     """
     Register a new scan and kick off the pipeline as an asyncio task.
     Returns the scan_id.
@@ -327,7 +333,7 @@ def start_scan(token: str, repo_url: str, base_branch: str = "main") -> str:
     # Fire-and-forget in the event loop. start_scan is always called from
     # within an async request handler, so a running loop is guaranteed.
     loop = asyncio.get_running_loop()
-    task = loop.create_task(run_scan(scan_id, token, repo_url, base_branch))
+    task = loop.create_task(run_scan(scan_id, token, repo_url, base_branch, user_key))
     _scans[scan_id]["task"] = task
 
     logger.info("Scan %s started for %s", scan_id, repo_url)

@@ -13,6 +13,7 @@ Provides:
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import re
@@ -24,7 +25,7 @@ from typing import Optional
 import httpx
 from github import Github
 
-from app.config import GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, SCAN_TEMP_DIR
+from app.config import ALLOW_UPSTREAM_PRS, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, SCAN_TEMP_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,10 @@ def clone_repo(token: str, repo_url: str, scan_id: str) -> str:
     it is removed before cloning.
     """
     full_name = parse_repo_full_name(repo_url)
-    clone_url = f"https://x-access-token:{token}@github.com/{full_name}.git"
+    # Clean URL — the token is NOT embedded. An embedded token would be written
+    # into repo/.git/config, and the scanned (untrusted) app later runs with
+    # cwd=repo, so it could read the scanning user's repo-scoped token.
+    clone_url = f"https://github.com/{full_name}.git"
 
     dest = Path(SCAN_TEMP_DIR) / scan_id
     repo_path = dest / "repo"
@@ -73,15 +77,30 @@ def clone_repo(token: str, repo_url: str, scan_id: str) -> str:
 
     dest.mkdir(parents=True, exist_ok=True)
 
+    # Pass the credential out-of-band as an HTTP auth header via GIT_CONFIG_*
+    # environment variables (git >= 2.31) — the same mechanism actions/checkout
+    # uses. It never touches disk or the process command line, and
+    # GIT_TERMINAL_PROMPT=0 makes git fail fast instead of hanging on a prompt.
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    git_env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+    }
+
     logger.info("Cloning %s into %s", full_name, repo_path)
     result = subprocess.run(
         ["git", "clone", "--depth", "1", clone_url, str(repo_path)],
         capture_output=True,
         text=True,
         timeout=120,
+        env=git_env,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"git clone failed: {result.stderr}")
+        stderr = (result.stderr or "").replace(token, "***").replace(basic, "***")
+        raise RuntimeError(f"git clone failed: {stderr.strip()}")
 
     repo_dir = str(repo_path)
     logger.info("Clone complete: %s", repo_dir)
@@ -425,8 +444,11 @@ def create_branch_and_pr(
     Returns the URL of the created PR.
 
     If the authenticated user does NOT have push access to the target repo,
-    the function automatically forks the repo and opens a cross-repo PR
-    (fork → upstream), which is the standard GitHub contribution model.
+    the repo is forked into the user's account and the fix is pushed there.
+    By default the PR is then opened INSIDE the fork (fork branch -> fork base),
+    so a public deployment can never send automated PRs to third-party
+    projects. With ALLOW_UPSTREAM_PRS=true it opens the classic cross-repo PR
+    (fork -> upstream) instead.
     
     Includes retry logic and better error handling.
     """
@@ -494,6 +516,18 @@ def create_branch_and_pr(
                 f"Could not find base branch '{base_branch}' or alternatives. "
                 f"Available branches: {branch_list}"
             )
+
+    # Where the PR is opened. Same-repo when the user can push; otherwise the
+    # user's fork, unless upstream PRs are explicitly allowed.
+    pr_to_upstream = (not use_fork) or ALLOW_UPSTREAM_PRS
+    pr_repo = upstream_repo if pr_to_upstream else push_repo
+    if use_fork and not pr_to_upstream:
+        # Bring the fork's base branch level with upstream so the PR diff is
+        # exactly the fix (a stale fork would otherwise show upstream drift).
+        try:
+            push_repo.merge_upstream(base_branch)
+        except Exception as exc:
+            logger.info("Fork sync skipped for %s: %s", push_repo.full_name, exc)
 
     # Create the new branch on the push target (fork or upstream)
     try:
@@ -565,12 +599,11 @@ def create_branch_and_pr(
     if commit_errors:
         raise RuntimeError(f"Failed to commit files: {'; '.join(commit_errors)}")
 
-    # Open the PR on the UPSTREAM repo
-    # For cross-repo PRs, head must be "fork_owner:branch"
-    head_ref = f"{fork_owner}:{_branch}" if use_fork else _branch
+    # Cross-repo PRs (fork -> upstream) need head="fork_owner:branch".
+    head_ref = f"{fork_owner}:{_branch}" if (use_fork and pr_to_upstream) else _branch
 
     try:
-        pr = upstream_repo.create_pull(
+        pr = pr_repo.create_pull(
             title=pr_title,
             body=pr_body,
             head=head_ref,
@@ -586,8 +619,8 @@ def create_branch_and_pr(
             # matches nothing. head_ref is already qualified for fork PRs; for
             # same-repo PRs we must add the upstream owner.
             try:
-                qualified_head = head_ref if use_fork else f"{upstream_repo.owner.login}:{_branch}"
-                prs = upstream_repo.get_pulls(state="open", head=qualified_head, base=base_branch)
+                qualified_head = head_ref if ":" in head_ref else f"{pr_repo.owner.login}:{_branch}"
+                prs = pr_repo.get_pulls(state="open", head=qualified_head, base=base_branch)
                 for pr in prs:
                     logger.info("Found existing PR: %s", pr.html_url)
                     return pr.html_url

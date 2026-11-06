@@ -167,3 +167,34 @@
   border-radius: 3px;
   color: var(--accent-blue);
 }
+
+.slowNote {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--accent-orange);
+  font-family: var(--font-mono);
+}
+
+.authError {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 60, 60, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 60, 60, 0.08);
+  color: var(--accent-red);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.authError button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}

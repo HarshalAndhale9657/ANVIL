@@ -1,12 +1,21 @@
 import styles from './GitHubConnect.module.css';
 
-export default function GitHubConnect({ user, loading, onLogin, onLogout }) {
+export default function GitHubConnect({
+  user, loading, slow, authError, onDismissError, onLogin, onLogout,
+}) {
   if (loading) {
     return (
       <div className={styles.wrap}>
         <div className={styles.checking}>
           <span className={styles.spinner}></span>
-          <span>Checking GitHub authentication...</span>
+          <span>
+            {slow ? 'Waking up the scan engine...' : 'Checking GitHub authentication...'}
+            {slow && (
+              <span className={styles.slowNote}>
+                The backend sleeps when idle on its free hosting tier. First load can take up to a minute.
+              </span>
+            )}
+          </span>
         </div>
       </div>
     );
@@ -40,6 +49,12 @@ export default function GitHubConnect({ user, loading, onLogin, onLogout }) {
 
   return (
     <div className={styles.wrap}>
+      {authError && (
+        <div className={styles.authError} role="alert">
+          <span>{authError}</span>
+          <button onClick={onDismissError} aria-label="Dismiss">×</button>
+        </div>
+      )}
       <div className={styles.notice}>
         <div className={styles.noticeIcon}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="20" height="20">
@@ -62,7 +77,9 @@ export default function GitHubConnect({ user, loading, onLogin, onLogout }) {
         </svg>
       </button>
       <p className={styles.scopeNote}>
-        Requires <code>repo</code> scope to clone private repos and open Pull Requests.
+        Requests the <code>repo</code> scope to clone the repository and open the fix
+        Pull Request. Your token is kept in an encrypted, HttpOnly session cookie and
+        is never stored server-side.
       </p>
     </div>
   );

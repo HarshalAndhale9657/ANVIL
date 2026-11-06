@@ -1,10 +1,51 @@
 /**
  * A.E.G.I.S. API Client
  * All communication with the FastAPI backend lives here.
- * The Vite proxy forwards /api → http://localhost:8000/api
+ *
+ * Requests are SAME-ORIGIN (relative /api/...): locally the Vite dev server
+ * proxies /api to :8000, and in production Vercel rewrites /api/* to the
+ * backend (frontend/vercel.json). Same-origin keeps the session cookie
+ * first-party, so login works in Safari/Firefox/Brave and private windows,
+ * which all block third-party cookies.
+ *
+ * VITE_API_URL is only for split-origin setups (not recommended).
  */
 
-const BASE = import.meta.env.VITE_API_URL || ''; // relative — Vite proxy handles it locally
+const BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+
+/** Build an Error carrying the server's human-readable `detail`. */
+async function errorFrom(res) {
+  const body = await res.json().catch(() => ({}));
+  let msg = body.detail;
+  if (Array.isArray(msg)) {
+    // FastAPI 422: [{msg: "Value error, must be a GitHub repository URL ..."}]
+    msg = msg.map(d => (d.msg || '').replace(/^Value error, /, '')).filter(Boolean).join('; ');
+  }
+  const err = new Error(msg || `HTTP ${res.status}`);
+  err.code = res.status;
+  return err;
+}
+
+// ── Deployment info ───────────────────────────────────────────────────────────
+
+/**
+ * Wake the backend early. Free-tier hosts sleep when idle and take up to a
+ * minute to cold-start; firing this on page load means the engine is usually
+ * awake by the time the visitor has read the hero and clicked Connect.
+ */
+export function warmUp() {
+  fetch(`${BASE}/api/health`, { credentials: 'include' }).catch(() => {});
+}
+
+/** Public deployment policy: demo repo, allowed owners, limits. */
+export async function getConfig() {
+  try {
+    const res = await fetch(`${BASE}/api/config`, { credentials: 'include' });
+    return res.ok ? await res.json() : null;
+  } catch {
+    return null;
+  }
+}
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
@@ -46,15 +87,7 @@ export async function startScan(repoUrl, baseBranch = 'main') {
     body: JSON.stringify({ repo_url: repoUrl, base_branch: baseBranch }),
   });
 
-  if (res.status === 401) {
-    const err = new Error('Not authenticated');
-    err.code = 401;
-    throw err;
-  }
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `HTTP ${res.status}`);
-  }
+  if (!res.ok) throw await errorFrom(res);
   return res.json();
 }
 

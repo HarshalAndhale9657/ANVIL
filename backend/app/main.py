@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import router as api_router
 from app.auth import router as auth_router
 from app.config import FRONTEND_URL
+from app.hardening import harden_process
 from app.telemetry import init_telemetry
 
 logging.basicConfig(
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    if harden_process():
+        logger.info("Process hardened: /proc/<pid>/environ unreadable by scanned-repo children")
     init_telemetry()
     logger.info("Anvil API server ready")
     yield
@@ -54,6 +57,8 @@ app.add_middleware(
         "http://127.0.0.1:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:8000",
+        # Production is same-origin (the frontend proxies /api/*), so CORS only
+        # matters for split-origin setups pointing VITE_API_URL at the backend.
         FRONTEND_URL,
     ],
     allow_credentials=True,

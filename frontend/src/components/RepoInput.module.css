@@ -253,3 +253,11 @@
 
 .disabledRow { opacity: 0.5; }
 .submitBtnDisabled { opacity: 0.5; cursor: not-allowed !important; }
+
+.policyNote {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}

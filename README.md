@@ -12,14 +12,33 @@ An autonomous, fail-closed red-team engine that discovers, exploits, verifies, a
 
 ---
 
-[🌐 Live Demo](https://aegis-frontend-azure.vercel.app) | [🏗️ Architecture](#system-architecture) | [🚀 Getting Started](#getting-started) | [📊 Benchmark](#-benchmark-results) | [⚙️ How It Works](#how-it-works) | [📚 Research](#research--inspiration)
+[🌐 Live Demo](https://anvil-aegis.vercel.app) | [🏗️ Architecture](#system-architecture) | [🚀 Getting Started](#getting-started) | [📊 Benchmark](#-benchmark-results) | [⚙️ How It Works](#how-it-works) | [📚 Research](#research--inspiration)
 
 ---
 
 </div>
 
+## Live Demo
+
+**[anvil-aegis.vercel.app](https://anvil-aegis.vercel.app)**: connect GitHub, click
+**Try the demo target**, and watch the full discover → exploit → verify → patch → PR cycle
+stream live against [`anvil-demo-target`](https://github.com/HarshalAndhale9657/anvil-demo-target),
+a deliberately vulnerable Flask app (insecure deserialization + path traversal).
+
+How the hosted demo is run:
+
+- **Curated targets only.** A scan clones the target repo and *executes its code* to exploit it
+  live. Docker isolation isn't available on the free host, so the public instance scans only the
+  demo target(s). Self-host to scan anything (`SCAN_ALLOWED_OWNERS=*`).
+- **No PRs to strangers.** You won't have write access to the demo repo, so ANVIL forks it into
+  *your* account and opens the fix PR **in your fork**. Nothing is pushed to anyone else's project.
+- **Rate-limited.** One scan at a time, 5 per user per day (bounds LLM spend).
+- **Cold starts.** The API sleeps when idle on its free tier; the first request can take up to a
+  minute, and the UI says so.
+
 ## Table of Contents
 
+- [Live Demo](#live-demo)
 - [Problem Statement](#problem-statement)
 - [The Solution](#the-solution)
 - [📊 Benchmark Results](#-benchmark-results)
@@ -42,6 +61,7 @@ An autonomous, fail-closed red-team engine that discovers, exploits, verifies, a
   - [Step 2 — Start the Backend](#step-2--start-the-backend)
   - [Step 3 — Start the Frontend](#step-3--start-the-frontend)
   - [One-Command Launch](#one-command-launch)
+- [Deploying (Render + Vercel)](#deploying-render--vercel)
 - [API Reference](#api-reference)
 - [Observability and Tracing](#observability-and-tracing)
 - [Data Contracts](#data-contracts)
@@ -335,7 +355,9 @@ anvil/
 |   +-- app/
 |   |   +-- main.py                  # FastAPI application + CORS + router mount
 |   |   +-- api.py                   # Scan REST endpoints + SSE streaming
-|   |   +-- auth.py                  # GitHub OAuth router (4 endpoints)
+|   |   +-- auth.py                  # GitHub OAuth router + encrypted session cookie
+|   |   +-- guardrails.py           # Scan admission: owner allowlist + rate limits
+|   |   +-- hardening.py            # Process hardening (non-dumpable server)
 |   |   +-- pipeline.py             # Async pipeline runner + event emitter
 |   |   +-- graph.py                 # CPN engine: Places, Transitions, routing
 |   |   +-- sandbox.py              # AST-validated subprocess sandbox
@@ -355,8 +377,12 @@ anvil/
 |   +-- evaluation/                  # Benchmark harness + known-vuln corpus + RESULTS.md
 |   +-- tests/                       # sandbox / verifier / CPN / gate / container / eval (pytest)
 |   +-- requirements.txt            # Python dependencies
+|   +-- pytest.ini                  # Test config (CI runs `pytest`)
 |   +-- .env.example                 # Environment variable template
 |
++-- frontend/vercel.json            # /api/* → backend proxy + security headers
++-- render.yaml                     # Render Blueprint for the API
++-- .github/workflows/ci.yml        # Backend tests + frontend build on every push
 +-- start.sh                        # One-command launcher (backend + frontend)
 ```
 
@@ -370,7 +396,12 @@ A.E.G.I.S. enforces security at every layer. If any validation step fails, the s
 |-------|-----------|---------------|-----------------|
 | Sandbox | AST Import Filtering | Blocks `shutil`, `ctypes`, `subprocess`, `multiprocessing`, `signal`, `importlib` before execution | Dangerous system-level imports in LLM-generated code |
 | Sandbox | AST Call Filtering | Blocks `os.remove`, `os.system`, `os.fork`, `eval`, `exec`, `subprocess.run` | Destructive operations and arbitrary code execution |
-| Sandbox | Env Allowlist | Only PATH / TLS / proxy vars forwarded; every secret dropped (fail-closed allowlist) | Environment variable / credential leakage into LLM-generated code |
+| Sandbox | Env Allowlist | Only PATH / TLS / proxy vars forwarded to exploit payloads **and** the scanned app; every secret dropped (fail-closed allowlist) | Server credentials leaking into LLM-generated or attacker-controlled code |
+| Host | Process-Group Kill | Scanned apps start in their own session; the whole group is SIGTERM'd then SIGKILL'd | Malicious apps leaving background processes on the host |
+| Host | Non-Dumpable Server | `prctl(PR_SET_DUMPABLE, 0)` at startup | Children reading the server's `/proc/<pid>/environ` (where the PaaS injects secrets) |
+| Credentials | Token Never on Disk | Clone auth via `GIT_CONFIG_*` http.extraheader (not the remote URL); token fields excluded from checkpoints; redacted from errors | The user's GitHub token being read from `.git/config` or SQLite by scanned code |
+| Admission | Scan Policy + Rate Limits | Strict repo-URL/branch validation, repo-owner allowlist, per-user/global concurrency, rolling-24h quotas | Abuse of a public deployment and unbounded LLM spend |
+| GitHub | Fork-Contained PRs | Without push access, the fix PR opens inside the user's fork unless `ALLOW_UPSTREAM_PRS=true` | Automated PRs being sent to third-party projects |
 | Sandbox | Hard Timeout | Configurable `timeout` on subprocess execution | Infinite loops and resource exhaustion |
 | Sandbox | SHA-256 Dedup | Per-scan hash circuit breaker blocks a payload after repeated failures | Retrying the same broken exploit indefinitely |
 | Patch | Live Re-Exploit Gate | Relaunch the patched app + re-run the exploit; accept only if it still STARTS and the exploit now FAILS | Ineffective or app-breaking patches that static analysis waves through |
@@ -378,8 +409,9 @@ A.E.G.I.S. enforces security at every layer. If any validation step fails, the s
 | CPN | Max Steps | 20-step absolute limit on graph traversal | Infinite state machine loops |
 | CPN | Retry Circuit Breaker | Maximum 3 retries at the verification gate | Exploit-Verify death spiral |
 | Schemas | Pydantic v2 Strict Mode | All inter-agent data validated against typed contracts | Context poisoning and malformed data propagation |
-| State | SQLite WAL Checkpoints | Full state serialized after every CPN transition | Data loss on crash; enables recovery |
-| Auth | Signed HttpOnly Cookies | `itsdangerous.URLSafeSerializer` with configurable secret | Session hijacking and token theft |
+| State | SQLite WAL Checkpoints | Full state (minus credentials) serialized after every CPN transition | Lost audit trail on crash |
+| Auth | Encrypted HttpOnly Cookie | GitHub token sealed with Fernet (AES + HMAC), 7-day TTL, `Secure` + `SameSite=Lax`; OAuth `state` CSRF check | Token disclosure from the cookie value, session forgery, login CSRF |
+| Auth | Same-Origin API | Vercel rewrites `/api/*` to the backend, so the session cookie is first-party | Login breaking where third-party cookies are blocked (Safari, Firefox, private windows) |
 
 ---
 
@@ -465,19 +497,50 @@ chmod +x start.sh
 
 ---
 
+## Deploying (Render + Vercel)
+
+```
+browser ──▶ Vercel (static React app)  ──/api/* rewrite──▶  Render (FastAPI, 1 worker)
+            anvil-aegis.vercel.app                          anvil-api.onrender.com
+```
+
+The browser only ever talks to the Vercel origin; `frontend/vercel.json` proxies `/api/*`
+to the backend. That keeps the session cookie **first-party**: a split-origin setup
+(frontend calling `*.onrender.com` directly) needs third-party cookies, which Safari,
+Firefox, Brave and every private window block, and then login silently fails.
+
+1. **GitHub OAuth App** (production; keep a separate one for localhost). Homepage
+   `https://<frontend>`, callback **`https://<frontend>/api/auth/callback`**.
+2. **Backend → Render**: *New → Blueprint* on this repo (`render.yaml`). Enter
+   `OPENAI_API_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`; `SESSION_SECRET` is
+   generated. Set `FRONTEND_URL` / `GITHUB_REDIRECT_URI` to your frontend origin.
+3. **Frontend → Vercel**: import the repo with root directory `frontend`, and point the
+   rewrite destination in `frontend/vercel.json` at your Render URL. No env vars needed.
+
+| Variable | Production value | Why |
+|---|---|---|
+| `COOKIE_SECURE` / `COOKIE_SAMESITE` | `true` / `lax` | HTTPS-only first-party cookie; startup refuses the placeholder `SESSION_SECRET` |
+| `SCAN_ALLOWED_OWNERS` | your account (add `,@self` to allow users' own repos, `*` for any) | scans execute the target's code |
+| `ALLOW_UPSTREAM_PRS` | `false` | without push access, PRs stay in the user's fork |
+| `MAX_CONCURRENT_SCANS`, `MAX_SCANS_PER_USER_PER_DAY`, `MAX_SCANS_PER_DAY` | `1`, `5`, `40` | free-tier capacity + LLM budget |
+| `DEMO_REPO_URL` | a deliberately vulnerable repo | one-click demo in the UI |
+
+---
+
 ## API Reference
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/api/auth/github` | No | Redirect to GitHub OAuth authorization |
-| `GET` | `/api/auth/callback` | No | OAuth code exchange, sets signed cookie |
+| `GET` | `/api/auth/callback` | No | OAuth code exchange (CSRF `state` checked), sets encrypted session cookie |
 | `GET` | `/api/auth/me` | Yes | Returns authenticated GitHub user profile |
 | `POST` | `/api/auth/logout` | No | Clears session cookie |
-| `POST` | `/api/scan` | Yes | Start scan `{"repo_url": "...", "base_branch": "main"}` |
-| `GET` | `/api/scan/{id}/stream` | No | SSE stream of real-time `ScanEvent` objects |
-| `GET` | `/api/scan/{id}` | No | Full `ScanResult` for a completed scan |
-| `GET` | `/api/scans` | Yes | List all scans for current session |
-| `GET` | `/health` | No | Health check endpoint |
+| `POST` | `/api/scan` | Yes | Start scan `{"repo_url": "...", "base_branch": "main"}`. 202, or 403 (owner not allowed), 422 (bad URL/branch), 429/503 (limits) |
+| `GET` | `/api/scan/{id}/stream` | Owner | SSE stream of real-time `ScanEvent` objects |
+| `GET` | `/api/scan/{id}` | Owner | Full `ScanResult` for a completed scan |
+| `GET` | `/api/scans` | Yes | List the current user's scans |
+| `GET` | `/api/config` | No | Public deployment policy (demo repo, allowed owners, limits) |
+| `GET` | `/api/health`, `/health` | No | Health check |
 
 ---
 

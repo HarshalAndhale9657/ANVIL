@@ -80,24 +80,25 @@ export default function HeroSection({ onScrollToDashboard }) {
         </p>
 
         <div className={styles.stats}>
+          {/* Figures from the 6-target benchmark (backend/evaluation/RESULTS.md). */}
           <div className={styles.stat}>
-            <span className={styles.statValue}>4</span>
-            <span className={styles.statLabel}>Autonomous Agents</span>
+            <span className={styles.statValue}>6/6</span>
+            <span className={styles.statLabel}>Vulns Detected</span>
+          </div>
+          <div className={styles.statDivider}></div>
+          <div className={styles.stat}>
+            <span className={styles.statValue}>5/6</span>
+            <span className={styles.statLabel}>Exploited + Verified</span>
+          </div>
+          <div className={styles.statDivider}></div>
+          <div className={styles.stat}>
+            <span className={styles.statValue}>3/6</span>
+            <span className={styles.statLabel}>Patches Live-Validated</span>
           </div>
           <div className={styles.statDivider}></div>
           <div className={styles.stat}>
             <span className={styles.statValue}>0</span>
-            <span className={styles.statLabel}>Human Interventions</span>
-          </div>
-          <div className={styles.statDivider}></div>
-          <div className={styles.stat}>
-            <span className={styles.statValue}>∞</span>
-            <span className={styles.statLabel}>Petri Net States</span>
-          </div>
-          <div className={styles.statDivider}></div>
-          <div className={styles.stat}>
-            <span className={styles.statValue}>24s</span>
-            <span className={styles.statLabel}>Avg Detection Time</span>
+            <span className={styles.statLabel}>Broken Patches Shipped</span>
           </div>
         </div>
 

@@ -154,6 +154,100 @@ def validate_code(code: str) -> Tuple[bool, str]:
     return True, "OK"
 
 
+# ── Environment isolation ────────────────────────────────────────────────────
+#
+# Fail-closed ALLOWLIST of environment variables forwarded to any UNTRUSTED
+# child process (exploit payloads AND the scanned repo's own app). Only what
+# Python startup, TLS/DNS and HTTP egress legitimately need is passed; every
+# other variable — the OpenAI key, OAuth client secret, session secret, and any
+# current-or-future secret — is dropped by default rather than relying on a
+# denylist that silently leaks anything not explicitly named.
+_ALLOWED_ENV_VARS: Set[str] = {
+    # Windows OS essentials
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
+    "TEMP", "TMP", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    # POSIX OS essentials
+    "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR",
+    # Python resolution
+    "PYTHONHOME", "PYTHONPATH", "PYTHONIOENCODING", "PYTHONUTF8",
+    # TLS / CA bundles (so requests HTTPS works)
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    # Proxy (if the operator routes egress through a proxy)
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+}
+
+
+def safe_subprocess_env() -> Dict[str, str]:
+    """
+    Return a scrubbed copy of the current environment that is safe to hand to
+    untrusted code. Matching is case-insensitive (Windows env keys vary in case)
+    while the original key name and value are preserved.
+    """
+    import os as _os
+
+    return {k: v for k, v in _os.environ.items() if k.upper() in _ALLOWED_ENV_VARS}
+
+
+def untrusted_popen_kwargs() -> Dict[str, object]:
+    """
+    Popen keyword arguments for launching UNTRUSTED code (a scanned repo's app):
+    a scrubbed environment, and on POSIX a new session so the child leads its
+    own process group and every descendant it spawns can be killed together
+    (see kill_process_tree) instead of surviving as an orphan on the host.
+    """
+    import os as _os
+
+    kwargs: Dict[str, object] = {"env": safe_subprocess_env()}
+    if _os.name == "posix":
+        kwargs["start_new_session"] = True
+    return kwargs
+
+
+def kill_process_tree(proc: Optional[subprocess.Popen], timeout: float = 5.0) -> None:
+    """
+    Stop *proc* and, on POSIX, every process in its group (it was started with
+    start_new_session=True, so its pgid == pid). SIGTERM first, SIGKILL after
+    *timeout*. Never raises.
+    """
+    import os as _os
+
+    if proc is None:
+        return
+    if _os.name == "posix":
+        import signal as _signal
+
+        def _signal_group(sig) -> None:
+            try:
+                _os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        _signal_group(_signal.SIGTERM)
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        # Always sweep the group: grandchildren may outlive the leader.
+        _signal_group(_signal.SIGKILL)
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            pass
+        return
+
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3)
+    except Exception:
+        pass
+
+
 # ── Execution ────────────────────────────────────────────────────────────────
 
 def execute_payload(
@@ -198,35 +292,7 @@ def execute_payload(
     tmp_path.write_text(code, encoding="utf-8")
 
     try:
-        # Build a safe environment with a fail-closed ALLOWLIST: only the
-        # variables Python startup, TLS/DNS, and HTTP egress legitimately need
-        # are forwarded. Every other variable — including any current-or-future
-        # secret — is dropped by default rather than relying on a denylist that
-        # silently leaks anything not explicitly named.
-        import os as _os
-
-        _ALLOWED_VARS = {
-            # Windows OS essentials
-            "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC",
-            "TEMP", "TMP", "HOMEDRIVE", "HOMEPATH", "USERPROFILE",
-            "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "NUMBER_OF_PROCESSORS",
-            "PROCESSOR_ARCHITECTURE",
-            # POSIX OS essentials (if run on Linux/Docker)
-            "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
-            # Python resolution
-            "PYTHONHOME", "PYTHONPATH", "PYTHONIOENCODING", "PYTHONUTF8",
-            # TLS / CA bundles (so requests HTTPS works)
-            "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-            # Proxy (if the operator routes egress through a proxy)
-            "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
-            "HTTP_PROXY".lower(), "HTTPS_PROXY".lower(), "NO_PROXY".lower(),
-        }
-        _allowed_upper = {v.upper() for v in _ALLOWED_VARS}
-        # Match case-insensitively (Windows env keys vary in case) while
-        # preserving the original key name and value.
-        safe_env = {
-            k: v for k, v in _os.environ.items() if k.upper() in _allowed_upper
-        }
+        safe_env = safe_subprocess_env()
 
         result = subprocess.run(
             [sys.executable, str(tmp_path)],

@@ -1,0 +1,63 @@
+# Render Blueprint — the ANVIL API (FastAPI) as a single web service.
+#
+# Deploy: Render Dashboard → New → Blueprint → select this repo. You'll be asked
+# for the `sync: false` secrets below. The frontend is deployed separately on
+# Vercel (frontend/vercel.json), which proxies /api/* to this service so the
+# browser sees one origin and the session cookie stays first-party.
+#
+# One instance, one worker: the scan registry, SSE queues and rate limits are
+# in-process by design (see app/pipeline.py, app/guardrails.py).
+services:
+  - type: web
+    name: anvil-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+
+      # ── Secrets (entered in the Render dashboard, never committed) ──────────
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+
+      # ── URLs: the public frontend origin (API is served under it via proxy) ─
+      - key: FRONTEND_URL
+        value: https://anvil-aegis.vercel.app
+      - key: GITHUB_REDIRECT_URI
+        value: https://anvil-aegis.vercel.app/api/auth/callback
+
+      # ── Same-origin session cookie ──────────────────────────────────────────
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: lax
+
+      # ── Public-demo guardrails ──────────────────────────────────────────────
+      # Scans execute the target repo's code on this host (Docker isolation is
+      # not available on Render), so the public instance only scans curated
+      # targets. Add ",@self" to let signed-in users scan their own repos.
+      - key: SCAN_ALLOWED_OWNERS
+        value: HarshalAndhale9657
+      - key: DEMO_REPO_URL
+        value: https://github.com/HarshalAndhale9657/anvil-demo-target
+      - key: ALLOW_UPSTREAM_PRS
+        value: "false"
+      - key: MAX_CONCURRENT_SCANS
+        value: "1"
+      - key: MAX_ACTIVE_SCANS_PER_USER
+        value: "1"
+      - key: MAX_SCANS_PER_USER_PER_DAY
+        value: "5"
+      - key: MAX_SCANS_PER_DAY
+        value: "40"

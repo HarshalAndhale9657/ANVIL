@@ -44,7 +44,7 @@ from typing import Optional
 import requests
 
 from app.config import SANDBOX_TIMEOUT_SECONDS
-from app.sandbox import execute_payload
+from app.sandbox import execute_payload, kill_process_tree, untrusted_popen_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -135,15 +135,8 @@ class _TargetApp:
         return tail[-600:].strip()
 
     def stop(self) -> None:
-        try:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(timeout=3)
-        except Exception:
-            pass
+        # Kills the app AND anything it spawned (own process group on POSIX).
+        kill_process_tree(self.proc)
         try:
             self._log_file.close()
         except Exception:
@@ -168,11 +161,13 @@ def _launch(repo_dir: str, entry_point: str, port: int) -> Optional[_TargetApp]:
     log_path = launcher_path + ".log"
     log_file = open(log_path, "wb")
     try:
+        # Untrusted code: never inherit the server's secrets.
         proc = subprocess.Popen(
             [sys.executable, launcher_path],
             stdout=subprocess.DEVNULL,
             stderr=log_file,
             cwd=repo_dir,
+            **untrusted_popen_kwargs(),
         )
     except Exception as exc:
         logger.warning("Failed to spawn target app for validation: %s", exc)

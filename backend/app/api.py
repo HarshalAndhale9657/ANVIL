@@ -15,7 +15,17 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
+from app import guardrails
 from app.auth import require_auth
+from app.config import (
+    ALLOW_UPSTREAM_PRS,
+    DEMO_REPO_URL,
+    MAX_ACTIVE_SCANS_PER_USER,
+    MAX_SCANS_PER_USER_PER_DAY,
+    SCAN_ALLOWED_OWNERS,
+)
+from app.github_service import get_github_user
+from app.guardrails import ScanRejected, repo_owner_allowed
 from app.pipeline import (
     get_scan_owner,
     get_scan_queue,
@@ -31,19 +41,75 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["scan"])
 
 
+@router.get("/health")
+async def api_health():
+    """Liveness probe reachable through the frontend's /api proxy."""
+    return {"status": "ok", "service": "anvil"}
+
+
+@router.get("/config")
+async def public_config():
+    """Public, non-secret deployment policy so the UI can explain it."""
+    from app.telemetry import is_omium_active
+
+    return {
+        "demo_repo_url": DEMO_REPO_URL or None,
+        "allowed_owners": SCAN_ALLOWED_OWNERS,
+        "upstream_prs": ALLOW_UPSTREAM_PRS,
+        "limits": {
+            "active_scans_per_user": MAX_ACTIVE_SCANS_PER_USER,
+            "scans_per_user_per_day": MAX_SCANS_PER_USER_PER_DAY or None,
+        },
+        "telemetry": is_omium_active(),
+    }
+
+
 @router.post("/scan")
 async def create_scan(body: ScanRequest, request: Request):
     """
     Start a new vulnerability scan on a GitHub repository.
     Returns the scan_id and SSE stream URL immediately.
+
+    Admission is policy-checked first (repo-owner allowlist, per-user and
+    global concurrency, daily quotas) because a scan clones and executes the
+    target's code and spends LLM credits.
     """
     token = require_auth(request)
 
-    scan_id = start_scan(
-        token=token,
-        repo_url=body.repo_url,
-        base_branch=body.base_branch,
-    )
+    try:
+        user = await get_github_user(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="GitHub session expired — please reconnect GitHub")
+    login = user.get("login", "")
+    user_key = str(user.get("id") or login)
+
+    if not repo_owner_allowed(body.repo_owner, login, SCAN_ALLOWED_OWNERS):
+        allowed = ", ".join(
+            "your own repositories" if o == "@self" else o for o in SCAN_ALLOWED_OWNERS
+        ) or "none"
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"This deployment does not scan repositories owned by '{body.repo_owner}'. "
+                f"Allowed: {allowed}."
+            ),
+        )
+
+    try:
+        guardrails.scan_limiter.acquire(user_key)
+    except ScanRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    try:
+        scan_id = start_scan(
+            token=token,
+            repo_url=body.repo_url,
+            base_branch=body.base_branch,
+            user_key=user_key,
+        )
+    except Exception:
+        guardrails.scan_limiter.release(user_key)
+        raise
 
     return JSONResponse(
         status_code=202,

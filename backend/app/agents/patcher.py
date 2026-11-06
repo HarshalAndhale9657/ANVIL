@@ -381,6 +381,8 @@ def run_patch_github(
                     continue
                 if live.applicable:
                     validation_label = f"Live re-exploit gate (attempt {attempt}/{PATCH_MAX_ATTEMPTS}): {live.reason}"
+                    logger.info("Patch attempt %d/%d ACCEPTED by live re-exploit gate: %s",
+                                attempt, PATCH_MAX_ATTEMPTS, live.reason)
                 else:
                     logger.info("Live re-exploit gate not applicable: %s", live.reason)
 

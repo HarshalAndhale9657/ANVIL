@@ -1,6 +1,6 @@
 import styles from './ScanComplete.module.css';
 
-export default function ScanComplete({ result, scanId, onReset }) {
+export default function ScanComplete({ result, scanId, onReset, telemetry = false }) {
   if (!result) return null;
 
   const secret = result.exploit?.exploit_evidence || null;
@@ -16,6 +16,19 @@ export default function ScanComplete({ result, scanId, onReset }) {
 
   const omiumUrl = 'https://app.omium.ai/overview';
 
+  // Outcome drives the headline: never claim a fix that didn't happen.
+  const outcome = prUrl ? 'patched' : (vulnCount === 0 && !result.partial) ? 'clean' : 'unpatched';
+  const HEADLINES = {
+    patched:   ['MISSION COMPLETE', 'Exploited, verified and patched'],
+    clean:     ['SCAN COMPLETE', 'No exploitable vulnerability found'],
+    unpatched: ['SCAN COMPLETE', 'Scan finished without a fix PR'],
+  };
+  const [headLabel, headTitle] = HEADLINES[outcome];
+  // When the user can't push to the repo, the PR is opened inside their fork.
+  const prOwner = prUrl?.replace('https://github.com/', '').split('/')[0];
+  const repoOwner = repoShort.split('/')[0];
+  const prInFork = !!(prOwner && repoOwner && prOwner.toLowerCase() !== repoOwner.toLowerCase());
+
   return (
     <div className={styles.card}>
       {/* Header */}
@@ -27,8 +40,8 @@ export default function ScanComplete({ result, scanId, onReset }) {
             </svg>
           </div>
           <div>
-            <div className={styles.headerLabel}>MISSION COMPLETE</div>
-            <div className={styles.headerTitle}>Full Autonomous Cycle Executed</div>
+            <div className={styles.headerLabel}>{headLabel}</div>
+            <div className={styles.headerTitle}>{headTitle}</div>
           </div>
         </div>
         <button className={styles.resetBtn} onClick={onReset}>
@@ -113,11 +126,13 @@ export default function ScanComplete({ result, scanId, onReset }) {
             <span className={styles.findingLabel}>PATCH STATUS</span>
             {prUrl ? (
               <a href={prUrl} target="_blank" rel="noopener noreferrer" className={styles.prLink}>
-                Pull Request opened →
+                {prInFork ? 'Pull Request opened in your fork →' : 'Pull Request opened →'}
                 <span className={styles.prUrlText}>{prUrl.replace('https://github.com/', '')}</span>
               </a>
+            ) : outcome === 'clean' ? (
+              <span className={styles.findingText}>Nothing to patch: no vulnerability was found in the scanned source.</span>
             ) : (
-              <span className={styles.findingText}>Patch committed to branch <code className={styles.findingCode}>{branch}</code></span>
+              <span className={styles.findingText}>No pull request was opened for <code className={styles.findingCode}>{branch}</code>.</span>
             )}
           </div>
         </div>
@@ -150,6 +165,7 @@ export default function ScanComplete({ result, scanId, onReset }) {
             REVIEW PULL REQUEST
           </a>
         )}
+        {telemetry && (
         <a href={omiumUrl} target="_blank" rel="noopener noreferrer" className={styles.actionSecondary}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" width="15" height="15">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
@@ -157,6 +173,7 @@ export default function ScanComplete({ result, scanId, onReset }) {
           </svg>
           VIEW OMIUM TRACE
         </a>
+        )}
       </div>
     </div>
   );

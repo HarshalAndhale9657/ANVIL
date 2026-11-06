@@ -5,7 +5,7 @@ const LAYERS = [
     icon: '⚡',
     title: 'FastAPI + Pydantic v2',
     color: '#00b4ff',
-    desc: 'ASGI webhook ingress with strict schema validation. Rejects malformed payloads in <10ms. Returns HTTP 202 instantly.'
+    desc: 'ASGI API with strict schema validation at the edge, plus scan-policy and rate-limit admission. Returns HTTP 202 instantly.'
   },
   {
     icon: '⚙',
@@ -17,7 +17,7 @@ const LAYERS = [
     icon: '◈',
     title: 'SQLite WAL Checkpoint',
     color: '#ffe34d',
-    desc: 'Crash-safe state persistence. Every Petri net transition is atomically committed. Full resume after failure.'
+    desc: 'Every Petri net transition is checkpointed atomically to SQLite, giving a full audit trail of each scan. Credentials are excluded from checkpoints.'
   },
   {
     icon: '◉',
@@ -33,9 +33,9 @@ const LAYERS = [
   },
   {
     icon: '◎',
-    title: 'Omium SDK (OTLP)',
+    title: 'OpenTelemetry Tracing',
     color: '#00b4ff',
-    desc: 'W3C Trace Context propagated across async boundaries. Every agent turn, token count and tool call causal-linked.'
+    desc: 'A span per CPN transition and LLM call, with token counts, linked by W3C Trace Context. Exports to Omium when configured.'
   },
 ];
 
@@ -47,7 +47,7 @@ export default function Architecture() {
           <span className={styles.sectionTag}>SYSTEM DESIGN</span>
           <h2 className={styles.sectionTitle}>Production-Grade Architecture</h2>
           <p className={styles.sectionSub}>
-            No LLM wrappers. No conversational loops. Pure mathematical orchestration.
+            Deterministic orchestration: the LLM proposes, the state machine decides.
           </p>
         </div>
 

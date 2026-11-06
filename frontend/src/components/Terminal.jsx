@@ -90,7 +90,7 @@ export default function Terminal({ logs, phase, repoUrl, retryInfo, scanId }) {
           <span className={styles.scanIdBadge}>scan_id: {scanId.slice(0, 8)}…</span>
         )}
         <a
-          href="https://github.com/DevOpsDreamer/ANVIL/tree/main/app"
+          href="https://github.com/HarshalAndhale9657/ANVIL/tree/main/backend/app"
           target="_blank" rel="noopener noreferrer"
           className={styles.viewScriptBtn}
         >

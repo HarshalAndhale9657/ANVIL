@@ -5,7 +5,16 @@ function isValidGithubUrl(url) {
   return /^https?:\/\/(www\.)?github\.com\/[^/]+\/[^/]+/.test(url.trim());
 }
 
-export default function RepoInput({ onStartScan, disabled, disabledReason }) {
+/** Human-readable summary of which repos this deployment will scan. */
+function describeAllowed(owners) {
+  if (!owners || owners.includes('*')) return null;
+  const parts = owners.map(o => (o === '@self' ? 'your own repositories' : `${o}/*`));
+  return parts.length ? `This deployment scans: ${parts.join(', ')}.` : null;
+}
+
+export default function RepoInput({ onStartScan, disabled, disabledReason, config }) {
+  const demoRepo = config?.demo_repo_url || null;
+  const allowedNote = describeAllowed(config?.allowed_owners);
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
   const [focused, setFocused] = useState(false);
@@ -101,15 +110,24 @@ export default function RepoInput({ onStartScan, disabled, disabledReason }) {
         </div>
       )}
 
-      <div className={styles.examples}>
-        <span className={styles.exLabel}>Try:</span>
-        {['https://github.com/DevOpsDreamer/ANVIL','https://github.com/pallets/flask'].map(ex => (
-          <button key={ex} className={styles.exBtn}
-            onClick={() => { setValue(ex); setError(''); }} disabled={disabled}>
-            {ex.replace('https://github.com/','')}
+      {demoRepo && (
+        <div className={styles.examples}>
+          <span className={styles.exLabel}>Try the demo target:</span>
+          <button className={styles.exBtn}
+            onClick={() => { setValue(demoRepo); setError(''); }} disabled={disabled}>
+            {demoRepo.replace('https://github.com/', '')}
           </button>
-        ))}
-      </div>
+          <span className={styles.exLabel}>(a deliberately vulnerable Flask app)</span>
+        </div>
+      )}
+      {config && (
+        <p className={styles.policyNote}>
+          {allowedNote && <>{allowedNote} </>}
+          {config.upstream_prs
+            ? 'If you can’t push to the repo, it is forked into your account and the fix PR is opened against the original.'
+            : 'If you can’t push to the repo, it is forked into your account and the fix PR is opened in your fork.'}
+        </p>
+      )}
     </div>
   );
 }
