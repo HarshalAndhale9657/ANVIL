@@ -12,5 +12,6 @@ yarn-debug.log*
 yarn-error.log*
 .vite/
 
-# Vercel CLI project link (local only)
+# Vercel CLI (project link + pulled OIDC token)
 .vercel/
+.env*
