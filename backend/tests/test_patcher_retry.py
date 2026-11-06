@@ -149,3 +149,85 @@ def test_all_attempts_rejected_fails_closed(tmp_path, monkeypatch):
             github_token="tok", repo_url="https://github.com/demo/x", repo_dir=str(tmp_path), base_branch="main",
         )
     assert called["pr"] is False  # fail-closed: no PR opened
+
+
+# ── The PR describes the vulnerability the exploit actually proved ──────────
+
+def _ep(path, desc):
+    return VulnerableEndpoint(path=path, method=HttpMethod.GET, injection_vector=desc)
+
+
+TRAVERSAL = _ep("app.py:34", "Path traversal via unsanitized user input in os.path.join")
+PICKLE = _ep("app.py:27", "Insecure deserialization via pickle.loads of attacker-controlled cookie")
+PICKLE_EXPLOIT = (
+    "import pickle, base64, requests\n"
+    "class E:\n    def __reduce__(self):\n        return (eval, ('1',))\n"
+    "requests.get('http://127.0.0.1:1/x', cookies={'c': base64.b64encode(pickle.dumps(E())).decode()})\n"
+)
+TRAVERSAL_EXPLOIT = (
+    "import requests, pickle, base64  # unused imports are common in generated scripts\n"
+    "print(requests.get('http://127.0.0.1:1/files/..%2f..%2fetc/passwd').text)\n"
+)
+
+
+def _exploit(script, exploit_type=None):
+    return ExploitOutput(vulnerability_confirmed=True, exploit_payload_used=script,
+                         sandbox_stdout="EXPLOIT_SUCCESS", exploit_type=exploit_type)
+
+
+def test_select_exploited_endpoint_matches_the_exploit_not_list_order():
+    eps = [TRAVERSAL, PICKLE]
+    assert patcher._select_exploited_endpoint(eps, _exploit(PICKLE_EXPLOIT)) is PICKLE
+    assert patcher._select_exploited_endpoint(eps, _exploit(TRAVERSAL_EXPLOIT)) is TRAVERSAL
+    sqli = _ep("db.py:9", "SQL injection in login query")
+    assert patcher._select_exploited_endpoint(
+        [TRAVERSAL, sqli], _exploit("print('x')", exploit_type="sql_injection")) is sqli
+    # Unattributable exploit → first finding (previous behaviour).
+    assert patcher._select_exploited_endpoint(eps, _exploit("print('hi')")) is TRAVERSAL
+    assert patcher._select_exploited_endpoint([], _exploit("x")) is None
+
+
+def test_pr_title_body_and_progress_follow_the_exploited_finding(tmp_path, monkeypatch):
+    (tmp_path / "app.py").write_text("import pickle\n# vulnerable\n", encoding="utf-8")
+    recon = ReconOutput(target_url="https://github.com/demo/x", detected_framework="Flask",
+                        vulnerable_endpoints=[TRAVERSAL, PICKLE])
+    exploit = _exploit(PICKLE_EXPLOIT)
+    verification = VerificationResult(verified=True, reason="ok")
+
+    prompts = []
+    monkeypatch.setattr(patcher, "_get_client",
+                        lambda: _fake_client(["import json  # sanitize validate\n"], prompts))
+    monkeypatch.setattr(pv, "validate_patch_by_reexploit",
+                        lambda **kw: PatchValidation(True, True, "exploit blocked"))
+    pushed = {}
+    monkeypatch.setattr(gh, "create_branch_and_pr",
+                        lambda **kw: pushed.update(kw) or "https://github.com/demo/x/pull/2")
+    events = []
+
+    patcher.run_patch_github(
+        recon=recon, exploit=exploit, verification=verification, trace_id="trace123456",
+        github_token="tok", repo_url="https://github.com/demo/x", repo_dir=str(tmp_path),
+        on_progress=lambda message, detail=None: events.append(message),
+    )
+
+    assert "deserialization" in pushed["pr_title"].lower()
+    assert "traversal" not in pushed["pr_title"].lower()
+    body = pushed["pr_body"]
+    assert "`app.py:27`" in body                          # location of the proven finding
+    assert "Also flagged in this file" in body and "app.py:34" in body
+    assert "https://github.com/HarshalAndhale9657/ANVIL" in body
+    assert "](https://github.com)" not in body
+    assert "Exploited Vulnerability (proven)" in prompts[0] and "app.py:27" in prompts[0]
+    assert "Other findings reported in this file" in prompts[0]
+    assert any("PASSED" in e for e in events)
+    assert events[-1] == "Opening Pull Request..."
+
+
+def test_static_gate_rejects_patch_that_deletes_module_docstring():
+    original = '"""Demo app docs."""\nimport pickle\nx = pickle.loads(b"")\n'
+    stripped = 'import json\nx = json.loads("{}")\n'
+    kept = '"""Demo app docs."""\nimport json\nx = json.loads("{}")\n'
+    ok, reason = patcher._static_patch_validation(original, stripped, "", "app.py")
+    assert not ok and "docstring" in reason
+    ok, _ = patcher._static_patch_validation(original, kept, "", "app.py")
+    assert ok

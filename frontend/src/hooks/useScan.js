@@ -98,7 +98,7 @@ export function useScan() {
     setRetryInfo(null);
     setPetriStage('idle');
 
-    addLog('▶ A.E.G.I.S. v2.0.0 — Autonomous Exploit Generation and Intelligent Security', 'system');
+    addLog('▶ A.E.G.I.S. — Autonomous Exploit Generation and Intelligent Security', 'system');
     addLog(`⚡ POST /api/scan — repo: ${url}`, 'event');
 
     try {

@@ -126,6 +126,13 @@ def _schedule_scan_eviction(scan_id: str) -> None:
 
 # ── Event emitter ────────────────────────────────────────────────────────────
 
+def _timestamps(scan_id: str) -> dict:
+    """created_at = when the scan was accepted; completed_at = now."""
+    now = datetime.utcnow().isoformat()
+    entry = _scans.get(scan_id) or {}
+    return {"created_at": entry.get("created_at") or now, "completed_at": now}
+
+
 async def _emit(scan_id: str, stage: ScanStage, status: str,
                 message: str = "", detail: str = None,
                 pr_url: str = None, vuln_count: int = None,
@@ -251,6 +258,7 @@ async def run_scan(
 
             if final_state.error:
                 result = ScanResult(
+                    **_timestamps(scan_id),
                     scan_id=scan_id,
                     repo_url=repo_url,
                     status="failed",
@@ -266,6 +274,7 @@ async def run_scan(
                             progress_pct=100)
             else:
                 result = ScanResult(
+                    **_timestamps(scan_id),
                     scan_id=scan_id,
                     repo_url=repo_url,
                     status="completed",
@@ -274,7 +283,6 @@ async def run_scan(
                         final_state.recon.vulnerable_endpoints if final_state.recon else []
                     ),
                     pr_url=pr_url,
-                    completed_at=datetime.utcnow().isoformat(),
                     recon=final_state.recon,
                     exploit=final_state.exploit,
                     verification=final_state.verification,
@@ -290,6 +298,7 @@ async def run_scan(
         except Exception as exc:
             logger.exception("Scan %s failed with exception", scan_id)
             result = ScanResult(
+                **_timestamps(scan_id),
                 scan_id=scan_id,
                 repo_url=repo_url,
                 status="failed",

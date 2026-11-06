@@ -372,6 +372,8 @@ def build_web_cpn(scan_id: str, emit_fn, loop=None) -> CPNEngine:
                 repo_url=state.repo_url,
                 repo_dir=state.repo_dir,
                 base_branch=state.base_branch,
+                on_progress=lambda message, detail=None: _emit_sync(
+                    ScanStage.PATCH, "running", message, detail=detail, progress_pct=85),
             )
             state.patch = result
             logger.info("Patch completed: PR=%s, confidence=%.0f%%",

@@ -11,7 +11,7 @@ import difflib
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 try:
     import omium as _omium_mod
@@ -50,6 +50,79 @@ def _get_client() -> OpenAI:
 # ── Regression Test ──────────────────────────────────────────────────────────
 
 
+_PROJECT_URL = "https://github.com/HarshalAndhale9657/ANVIL"
+
+# Vulnerability classes used to tie the exploit that actually ran back to the
+# recon finding it proved: (class, markers in an exploit script, markers in a
+# finding's description). Script markers are deliberately specific — exploit
+# scripts often import pickle/base64 even when the attack is something else.
+_VULN_CLASSES = (
+    ("deserialization",
+     ("pickle.dumps", "pickle.loads", "__reduce__", "yaml.dump", "marshal.dumps", "jsonpickle"),
+     ("pickle", "deserializ", "unpickl", "yaml.load", "marshal")),
+    ("path_traversal",
+     ("../", "..%2f", "%2e%2e", "..\\\\", "/etc/passwd", "win.ini"),
+     ("traversal", "arbitrary file", "file read", "lfi", "directory")),
+    ("sql_injection",
+     ("union select", "' or ", "or 1=1", "sqlite_master", "information_schema", "' --"),
+     ("sql",)),
+    ("ssti",
+     ("{{", "{%"),
+     ("template", "ssti", "jinja")),
+    ("command_injection",
+     ("; id", "&& id", "| id", "$(", "`id`", "whoami", "; cat ", "&& cat "),
+     ("command injection", "os.system", "subprocess", "shell", "os command")),
+    ("ssrf",
+     ("169.254.169.254", "metadata.google", "gopher://"),
+     ("ssrf", "server-side request")),
+)
+
+
+def _finding_file(endpoint) -> str:
+    return endpoint.path.split(":")[0] if ":" in endpoint.path else endpoint.path
+
+
+def _select_exploited_endpoint(endpoints, exploit: ExploitOutput):
+    """
+    Return the recon finding the verified exploit actually proved.
+
+    Recon can report several findings; the exploiter picks one to attack. The
+    patch, PR title and PR body must describe *that* one — not simply the
+    first finding — or the report contradicts its own proof of exploitation.
+    Falls back to the first finding when the exploit can't be attributed.
+    """
+    if not endpoints:
+        return None
+    if len(endpoints) == 1:
+        return endpoints[0]
+
+    script = (exploit.exploit_payload_used or "").lower()
+    etype = (exploit.exploit_type or "").lower().replace(" ", "_")
+
+    scored = []
+    for cls, script_markers, finding_markers in _VULN_CLASSES:
+        hits = sum(1 for m in script_markers if m in script)
+        if etype and (cls in etype or any(m in etype for m in finding_markers)):
+            hits += 10  # an explicit exploit_type outranks script heuristics
+        if hits:
+            scored.append((hits, finding_markers))
+
+    for _hits, finding_markers in sorted(scored, key=lambda s: -s[0]):
+        match = next(
+            (ep for ep in endpoints
+             if any(m in ep.injection_vector.lower() for m in finding_markers)),
+            None,
+        )
+        if match is not None:
+            return match
+    return endpoints[0]
+
+
+def _one_line(text: str, limit: int = 80) -> str:
+    line = (text or "").strip().splitlines()[0] if (text or "").strip() else "Security vulnerability"
+    return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+
+
 def _static_patch_validation(
     original_code: str,
     fixed_code: str,
@@ -82,9 +155,19 @@ def _static_patch_validation(
     if is_python:
         import ast
         try:
-            ast.parse(fixed_code)
+            fixed_tree = ast.parse(fixed_code)
         except SyntaxError as exc:
             return False, f"Patched code has a syntax error: {exc}"
+        # A security fix has no business deleting the module's documentation.
+        try:
+            original_doc = ast.get_docstring(ast.parse(original_code))
+        except SyntaxError:
+            original_doc = None
+        if original_doc and not ast.get_docstring(fixed_tree):
+            return False, (
+                "Patch deleted the module docstring. Keep unrelated code, comments "
+                "and docstrings exactly as they were; change only what the fix needs."
+            )
 
     # 3. Look for known unsafe patterns that should have been removed.
     #    These are heuristics covering the most common vulnerability classes.
@@ -205,12 +288,24 @@ def run_patch_github(
     repo_url: str,
     repo_dir: str,
     base_branch: str = "main",
+    on_progress: Optional[Callable[..., None]] = None,
 ) -> PatchOutput:
     """
     Generate a fix and push it as a Pull Request to the user's GitHub repo
     via the GitHub API (no local git needed for the push).
+
+    *on_progress(message, detail=None)* receives live updates from the
+    generate → validate → retry loop (used for the UI's agent terminal).
     """
     from app.github_service import create_branch_and_pr, parse_repo_full_name
+
+    def _progress(message: str, detail: Optional[str] = None) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(message, detail)
+        except Exception as exc:  # progress reporting must never break a patch
+            logger.debug("on_progress callback failed: %s", exc)
 
     with trace_operation(
         "patcher_agent_github",
@@ -223,12 +318,9 @@ def run_patch_github(
     ) as span:
         repo_full_name = parse_repo_full_name(repo_url)
 
-        # Step 1: Identify the vulnerable file and read it
-        vuln_path = None
-        if recon.vulnerable_endpoints:
-            raw_path = recon.vulnerable_endpoints[0].path
-            # Extract file path (strip line numbers like "server.py:23")
-            vuln_path = raw_path.split(":")[0] if ":" in raw_path else raw_path
+        # Step 1: Identify the finding the exploit proved, and read its file.
+        primary = _select_exploited_endpoint(recon.vulnerable_endpoints, exploit)
+        vuln_path = _finding_file(primary) if primary else None
 
         # Try to find the file in the cloned repo
         target_file = None
@@ -276,27 +368,42 @@ def run_patch_github(
             '  "explanation": "<brief explanation of what was fixed>",\n'
             '  "confidence": <float 0-1>\n'
             "}\n"
-            "The fix should:\n"
-            "1. Sanitize user input to prevent the exploit\n"
-            "2. Keep all other functionality intact\n"
-            "3. Use secure coding practices (path canonicalization, input validation)\n"
-            "4. NOT add any comments referencing this tool or AI\n"
+            "The fix must:\n"
+            "1. Close the exploited vulnerability: the exploit below must no longer work.\n"
+            "2. Be a minimal, focused change. Keep every unrelated line, import, comment, "
+            "docstring and formatting exactly as it is; never delete the module docstring.\n"
+            "3. Keep all other functionality intact; the app must still start and serve "
+            "normal requests.\n"
+            "4. Use correct secure patterns, for example: path containment via "
+            "os.path.realpath + os.path.commonpath (or werkzeug.utils.safe_join), never a "
+            "bare startswith() prefix check; json instead of pickle/marshal for untrusted "
+            "data, catching malformed input (binascii.Error / ValueError) and returning a "
+            "4xx instead of crashing; parameterized SQL; subprocess with an argument list "
+            "and no shell=True.\n"
+            "5. If other findings are listed for this file, fix them too with the same care.\n"
+            "6. NOT add any comments referencing this tool or AI.\n"
         )
 
-        vuln_desc = (
-            recon.vulnerable_endpoints[0].injection_vector
-            if recon.vulnerable_endpoints else "unknown"
-        )
+        vuln_desc = primary.injection_vector if primary else "unknown"
+        others = [
+            ep for ep in recon.vulnerable_endpoints
+            if ep is not primary and _finding_file(ep) == vuln_path
+        ]
 
         user_prompt = (
             f"## Vulnerable File: {target_file}\n"
             f"```python\n{original_code}\n```\n\n"
-            f"## Vulnerability Details\n"
+            f"## Exploited Vulnerability (proven)\n"
+            f"- Location: {primary.path if primary else target_file}\n"
             f"- Type: {vuln_desc}\n"
             f"- Exploit payload:\n```python\n{exploit.exploit_payload_used}\n```\n"
             f"- Sandbox stdout: {exploit.sandbox_stdout[:500]}\n"
             f"- Verification: {verification.reason}\n"
         )
+        if others:
+            user_prompt += "\n## Other findings reported in this file\n" + "".join(
+                f"- {ep.path}: {_one_line(ep.injection_vector, 200)}\n" for ep in others
+            )
 
         # Steps 3–3b: generate a fix and validate it, retrying with the
         # validator's feedback when a patch is ineffective or breaks the app.
@@ -359,6 +466,8 @@ def run_patch_github(
                 last_rejection = f"static analysis: {static_reason}"
                 feedback = f"Reason: {last_rejection}"
                 logger.warning("Patch attempt %d/%d rejected (static): %s", attempt, PATCH_MAX_ATTEMPTS, static_reason)
+                _progress(f"Patch attempt {attempt}/{PATCH_MAX_ATTEMPTS} rejected by static analysis, "
+                          "retrying with feedback", static_reason)
                 continue
 
             # Live re-exploit gate (authoritative when applicable).
@@ -378,13 +487,21 @@ def run_patch_github(
                     last_rejection = live.reason
                     feedback = f"Reason: {live.reason}"
                     logger.warning("Patch attempt %d/%d rejected (live gate): %s", attempt, PATCH_MAX_ATTEMPTS, live.reason)
+                    _progress(f"Patch attempt {attempt}/{PATCH_MAX_ATTEMPTS} rejected by the live "
+                              "re-exploit gate, retrying with feedback", live.reason)
                     continue
                 if live.applicable:
                     validation_label = f"Live re-exploit gate (attempt {attempt}/{PATCH_MAX_ATTEMPTS}): {live.reason}"
                     logger.info("Patch attempt %d/%d ACCEPTED by live re-exploit gate: %s",
                                 attempt, PATCH_MAX_ATTEMPTS, live.reason)
+                    _progress("Live re-exploit gate PASSED: the original exploit is blocked "
+                              "on the patched app", live.reason)
                 else:
                     logger.info("Live re-exploit gate not applicable: %s", live.reason)
+                    _progress("Static validation passed (live re-exploit gate not applicable)",
+                              live.reason)
+            else:
+                _progress("Static validation passed", static_reason)
 
             # Accepted.
             span.set_attribute("patch.attempts", attempt)
@@ -397,23 +514,36 @@ def run_patch_github(
 
         # Step 4: Build the PR content
         fix_branch = f"anvil/fix-{trace_id[:12]}"
-        pr_title = f"🛡️ Security Fix: {vuln_desc[:80]} — Anvil Scan {trace_id[:8]}"
+        pr_title = f"🛡️ Security fix: {_one_line(vuln_desc)}"
+        location = primary.path if primary else target_file
+        also_flagged = ""
+        if others:
+            also_flagged = (
+                "## ℹ️ Also flagged in this file\n\n"
+                + "".join(f"- `{ep.path}`: {_one_line(ep.injection_vector, 160)}\n" for ep in others)
+                + "\nThese were reported by recon and included in the fix request; only the "
+                "exploited vulnerability above is proven and re-exploit-validated.\n\n"
+            )
         pr_body = (
-            f"## 🔍 Vulnerability Report\n\n"
+            f"## 🔍 Vulnerability\n\n"
             f"**Repository**: {repo_url}\n"
-            f"**File**: `{target_file}`\n"
-            f"**Type**: {vuln_desc}\n\n"
+            f"**Location**: `{location}`\n"
+            f"**Finding**: {vuln_desc.strip()}\n\n"
             f"## 💣 Proof of Exploitation\n\n"
-            f"```\n{exploit.sandbox_stdout[:1000]}\n```\n\n"
-            f"## 🩹 Fix Applied\n\n{explanation}\n\n"
-            f"## ✅ Patch Validation\n\n"
+            f"A generated exploit ran against the app, launched from this repository "
+            f"in a sandbox, and produced:\n\n"
+            f"```\n{exploit.sandbox_stdout[:1000].strip()}\n```\n\n"
+            f"## 🩹 Fix\n\n{explanation}\n\n"
+            f"## ✅ Validation\n\n"
             f"{validation_label}\n\n"
-            f"**Confidence**: {confidence:.0%}\n"
-            f"**Trace ID**: `{trace_id}`\n\n"
+            f"**Confidence**: {confidence:.0%}\n\n"
+            f"{also_flagged}"
             f"---\n"
-            f"*This PR was automatically generated by [Anvil](https://github.com) — "
-            f"Autonomous Security Remediation Platform*"
+            f"*Opened automatically by [A.E.G.I.S. (ANVIL)]({_PROJECT_URL}), an autonomous "
+            f"find → exploit → verify → patch pipeline. Trace ID: `{trace_id}`*"
         )
+
+        _progress("Opening Pull Request...")
 
         # Step 5: Push to GitHub and create PR
         pr_url = create_branch_and_pr(
