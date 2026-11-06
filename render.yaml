@@ -24,12 +24,15 @@ services:
       # ── Secrets (entered in the Render dashboard, never committed) ──────────
       - key: OPENAI_API_KEY
         sync: false
-      - key: GITHUB_CLIENT_ID
-        sync: false
       - key: GITHUB_CLIENT_SECRET
         sync: false
       - key: SESSION_SECRET
         generateValue: true
+
+      # ── Public (non-secret) config ──────────────────────────────────────────
+      # Production GitHub OAuth App; its callback must equal GITHUB_REDIRECT_URI.
+      - key: GITHUB_CLIENT_ID
+        value: Ov23li4XOcXnabXrZK4Q
 
       # ── URLs: the public frontend origin (API is served under it via proxy) ─
       - key: FRONTEND_URL
