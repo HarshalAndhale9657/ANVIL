@@ -20,12 +20,26 @@ An autonomous, fail-closed red-team engine that discovers, exploits, verifies, a
 
 ## Live Demo
 
-**[anvil-aegis.vercel.app](https://anvil-aegis.vercel.app)**: connect GitHub, click
-**Try the demo target**, and watch the full discover → exploit → verify → patch → PR cycle
+**[anvil-aegis.vercel.app](https://anvil-aegis.vercel.app)**: connect GitHub, click the demo
+target, press **Start Scan**, and watch the full discover → exploit → verify → patch → PR cycle
 stream live against [`anvil-demo-target`](https://github.com/HarshalAndhale9657/anvil-demo-target),
 a deliberately vulnerable Flask app (insecure deserialization + path traversal).
 
+A typical run takes about 40 seconds:
+
+1. **Recon** reads the code and reports both vulnerabilities.
+2. **Exploit** launches the app, attacks it with a generated pickle payload and extracts
+   `{"active_theme":"PWNED_BY_ANVIL"}`.
+3. **Verify** checks that proof deterministically (no LLM).
+4. **Patch** writes a fix, relaunches the patched app and re-runs the same exploit. The terminal
+   shows `Live re-exploit gate PASSED` only if the app still works and the exploit now fails.
+5. **PR** opens with the proof, the validation result and a minimal diff. Example output:
+   **[anvil-demo-target#3](https://github.com/HarshalAndhale9657/anvil-demo-target/pull/3)**.
+
 How the hosted demo is run:
+
+- **Minimal GitHub access.** Sign-in asks only for access to public repositories (`public_repo`),
+  enough to fork the demo and open a PR. It cannot read private code.
 
 - **Curated targets only.** A scan clones the target repo and *executes its code* to exploit it
   live. Docker isolation isn't available on the free host, so the public instance scans only the
@@ -136,16 +150,16 @@ Without Omium, tracking the state of an autonomous red-team agent across a FastA
 
 ### Production-Grade Observability (Omium SDK + W3C Trace Context)
 
-A.E.G.I.S. does not operate as a black box. Every pipeline execution emits structured OpenTelemetry spans with rich attributes — `cpn.transition`, `cpn.step`, `cpn.retry_count`, `llm.prompt_tokens`, `sandbox.stdout_length`, `verification.result`, and `patch.confidence`. The Omium SDK exports traces via OTLP gRPC to `ingest.monium.yandex.cloud:443`.
+A.E.G.I.S. does not operate as a black box. Every pipeline execution emits structured OpenTelemetry spans with rich attributes — `cpn.transition`, `cpn.step`, `cpn.retry_count`, `llm.prompt_tokens`, `sandbox.stdout_length`, `verification.result`, and `patch.confidence`. The Omium SDK exports them to the configured `OMIUM_ENDPOINT` when `OMIUM_API_KEY` is set; without a key, tracing is a no-op (the hosted demo runs with it off).
 
 Critically, **W3C Trace Context is propagated across asynchronous boundaries** (from the FastAPI request handler into `asyncio.to_thread` and through the CPN engine), ensuring the entire multi-agent pipeline — from the initial HTTP request to the final GitHub PR — appears as a single, connected distributed trace. This is not bolted-on logging; it is first-class, standards-compliant observability.
 
 ### Fail-Closed and Deterministic Architecture
 
-The Verifier Agent is intentionally **not an LLM**. It is pure deterministic Python that performs three cryptographic checks:
+The Verifier Agent is intentionally **not an LLM**. It is pure deterministic Python that performs three checks:
 1. `vulnerability_confirmed` must be `True`
-2. `sandbox_stdout` must contain `EXPLOIT_SUCCESS` or `FLAG{`
-3. If `extracted_secret` is set, a strict regex (`FLAG\{[A-Za-z0-9_\-]+\}`) must match in stdout
+2. `sandbox_stdout` must contain the `EXPLOIT_SUCCESS` marker
+3. stdout must also carry **real, non-failure evidence**: an explicit proof line (`EXTRACTED_DATA:`, `CONFIRMED:`, `[+]`) or substantive output that isn't a traceback or error. A marker printed by a failed exploit is rejected
 
 If any check fails, the pipeline retries the exploit (up to 3 attempts) or halts at a terminal error state. The LLM cannot talk its way past verification. This is the anti-hallucination checkpoint that prevents false positives from reaching the patch stage.
 
@@ -157,7 +171,7 @@ Unlike agent frameworks that use LLMs for routing (introducing non-determinism a
 
 A.E.G.I.S. operates against real APIs:
 - **GitHub REST API** via PyGithub — clone repos, create branches, push commits, open Pull Requests using the authenticated user's OAuth token
-- **GitHub OAuth 2.0** — full authorization code flow with signed HttpOnly cookies
+- **GitHub OAuth 2.0** — authorization code flow with a CSRF `state` check and an encrypted HttpOnly session cookie
 - **OpenAI GPT-4o** — structured JSON output with Pydantic validation for all agent responses
 - **Real-time SSE streaming** — not polling, not WebSocket emulation, but proper `text/event-stream` via `sse-starlette`
 
@@ -205,15 +219,18 @@ POST /api/scan --> Pipeline Runner (asyncio.to_thread)
         |     [FAIL] --> Retry (up to 3x) --> back to [3]
         |
         v
-    [5] Patcher Agent: GPT-4o generates security fix, then PROVES it:
+    [5] Patcher Agent: GPT-4o generates a minimal fix for the finding the exploit
+        |   proved, then PROVES it:
         |   LIVE RE-EXPLOIT GATE — apply the fix to a throwaway copy, relaunch the
-        |   app in a --network none container, re-run the exploit; accept ONLY if
-        |   the app still starts AND the exploit now fails
+        |   app (--network none container; isolated subprocess where Docker is
+        |   unavailable), re-run the exploit; accept ONLY if the app still starts
+        |   AND the exploit now fails
         |         |
         |     [REJECTED] --> feed the failure back to the LLM, regenerate (<=3x);
         |                    fail-closed (NO PR) if none pass
         |         |
-        |     [ACCEPTED] --> create fix/ branch, push patched files, open Pull Request
+        |     [ACCEPTED] --> push an anvil/fix-* branch, open a Pull Request with
+        |                    the proof of exploitation and the validation result
         |
         v
     SSE event: "completed" with PR URL --> Frontend renders results
@@ -253,7 +270,7 @@ stateDiagram-v2
 | **Recon Agent** | Analyze cloned source code for security vulnerabilities | GPT-4o | Structured JSON output validated against `ReconOutput` schema; deterministic fallback if LLM returns invalid data |
 | **Exploit Agent** | Generate + run a standalone Python exploit | GPT-4o | AST-validated sandbox (import/call filtering, fail-closed env allowlist, timeout, per-scan SHA-256 circuit breaker); deterministic exploit templates as fallback; auto-launches the target app to exploit it live |
 | **Verifier Agent** | Deterministically confirm exploitation | None | Pure Python — requires the `EXPLOIT_SUCCESS` marker **plus real, non-failure evidence**; rejects hallucinated or failed exploits. Zero LLM, zero hallucination surface |
-| **Patcher Agent** | Generate a fix, **prove it**, open a GitHub PR | GPT-4o | Self-correcting: static gate → **live re-exploit gate** (relaunch the patched app in a sealed `--network none` container and re-run the exploit — accept only if it still starts **and** the exploit now fails) → on rejection, feed the failure back and regenerate (≤3 attempts); **fail-closed** (no PR) if none pass. Then create `fix/` branch, push, open PR |
+| **Patcher Agent** | Generate a fix, **prove it**, open a GitHub PR | GPT-4o | Self-correcting: static gate → **live re-exploit gate** (relaunch the patched app in a sealed `--network none` container and re-run the exploit — accept only if it still starts **and** the exploit now fails) → on rejection, feed the failure back and regenerate (≤3 attempts); **fail-closed** (no PR) if none pass. Targets the finding the exploit actually proved, keeps the diff minimal (unrelated code and docstrings untouched), then pushes an `anvil/fix-*` branch and opens the PR |
 
 ### SSE Event Lifecycle
 
@@ -405,6 +422,8 @@ A.E.G.I.S. enforces security at every layer. If any validation step fails, the s
 | Sandbox | Hard Timeout | Configurable `timeout` on subprocess execution | Infinite loops and resource exhaustion |
 | Sandbox | SHA-256 Dedup | Per-scan hash circuit breaker blocks a payload after repeated failures | Retrying the same broken exploit indefinitely |
 | Patch | Live Re-Exploit Gate | Relaunch the patched app + re-run the exploit; accept only if it still STARTS and the exploit now FAILS | Ineffective or app-breaking patches that static analysis waves through |
+| Patch | Minimal-Diff Gate | Static gate rejects a patch that deletes the module docstring; the prompt requires unrelated code to stay untouched | Noisy rewrites that hide the real fix from reviewers |
+| Patch | Finding Attribution | PR title, location and results card describe the finding the verified exploit proved | Reports that contradict their own proof of exploitation |
 | Isolation | Sealed Container | `--network none` + memory/pid/cpu caps + non-root + ephemeral (host fallback) | Untrusted target/exploit code reaching the host or the internet |
 | CPN | Max Steps | 20-step absolute limit on graph traversal | Infinite state machine loops |
 | CPN | Retry Circuit Breaker | Maximum 3 retries at the verification gate | Exploit-Verify death spiral |
@@ -542,7 +561,7 @@ Firefox, Brave and every private window block, and then login silently fails.
 | `GET` | `/api/scan/{id}/stream` | Owner | SSE stream of real-time `ScanEvent` objects |
 | `GET` | `/api/scan/{id}` | Owner | Full `ScanResult` for a completed scan |
 | `GET` | `/api/scans` | Yes | List the current user's scans |
-| `GET` | `/api/config` | No | Public deployment policy (demo repo, allowed owners, limits) |
+| `GET` | `/api/config` | No | Public deployment policy (demo repo, allowed owners, OAuth scope, limits) |
 | `GET` | `/api/health`, `/health` | No | Health check |
 
 ---
@@ -580,11 +599,12 @@ All inter-agent communication is governed by strict Pydantic v2 schemas. No free
 |--------|----------|----------|--------|
 | `WebhookPayload` | API Layer | Pipeline | `target_url`, `deployment_id`, `repo_url` |
 | `ReconOutput` | Recon Agent | Exploit Agent | `target_url`, `detected_framework`, `vulnerable_endpoints[]` |
-| `ExploitOutput` | Exploit Agent | Verifier | `vulnerability_confirmed`, `exploit_payload_used`, `sandbox_stdout`, `extracted_secret` |
+| `ExploitOutput` | Exploit Agent | Verifier | `vulnerability_confirmed`, `exploit_payload_used`, `sandbox_stdout`, `exploit_evidence`, `exploit_type` |
 | `VerificationResult` | Verifier | Patcher (gate) | `verified`, `reason`, `expected_pattern`, `actual_value` |
-| `PatchOutput` | Patcher Agent | Results | `file_modified`, `unified_diff`, `pr_url`, `confidence_score` |
+| `PatchOutput` | Patcher Agent | Results | `file_modified`, `unified_diff`, `pull_request_title`, `pr_url`, `confidence_score` |
 | `MasterState` | CPN Engine | All Agents | The coloured token: carries all accumulated state through the net |
-| `ScanEvent` | Pipeline | Frontend (SSE) | `scan_id`, `stage`, `status`, `message`, `pr_url`, `progress_pct` |
+| `ScanEvent` | Pipeline | Frontend (SSE) | `scan_id`, `stage`, `status`, `message`, `detail`, `pr_url`, `progress_pct` |
+| `ScanResult` | Pipeline | Frontend (`GET /api/scan/{id}`) | `status`, `vulnerabilities[]`, `exploited_finding`, `recon`, `exploit`, `verification`, `patch`, `pr_url`, `created_at`, `completed_at` |
 
 ---
 
@@ -596,12 +616,12 @@ A.E.G.I.S. was designed as a production-capable foundation, not a hackathon prot
 |------------|-------------|
 | **CI/CD Pipeline Integration** | Trigger scans automatically on push/PR events via GitHub Webhooks, integrating A.E.G.I.S. into existing DevSecOps workflows |
 | **Multi-Platform Support** | Extend GitHub integration to GitLab, Bitbucket, and Azure DevOps using a provider abstraction layer |
-| **Expanded Skill Repository** | Add detection modules for OWASP Top 10 categories beyond path traversal: SQL injection, XSS, SSRF, insecure deserialization |
+| **Expanded Skill Repository** | Add exploit templates for OWASP Top 10 classes beyond the six benchmarked ones (e.g. XXE, IDOR, auth bypass) |
 | **Parallel Multi-Vulnerability Scanning** | Fork the CPN into parallel sub-nets, one per vulnerability, enabling simultaneous exploitation and patching |
 | **Persistent Scan History** | Replace in-memory scan registry with PostgreSQL for multi-session, multi-user scan history and analytics |
 | **Role-Based Access Control** | Extend OAuth to support team-based access with repository-level permissions |
 | **Custom Policy Engine** | Allow teams to define which vulnerability classes trigger auto-patching vs. manual review |
-| **Container-Based Sandbox** | Upgrade from AST-validated subprocess to gVisor or Firecracker micro-VMs for stronger isolation |
+| **Stronger Isolation** | Run every stage (not just the patch gate) in gVisor or Firecracker micro-VMs, including on hosts without Docker |
 
 ---
 

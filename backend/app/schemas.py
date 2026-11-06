@@ -25,7 +25,7 @@ class WebhookPayload(BaseModel):
     repo_url: Optional[str] = Field(None, description="Git clone URL of the target repo")
     auth_signature: Optional[str] = Field(None, description="HMAC signature for payload integrity")
     # Web-app pipeline additions (populated by pipeline.py, not from external webhooks)
-    repo_name: Optional[str] = Field(None, description="'owner/repo' short name, e.g. 'DevOpsDreamer/ANVIL'")
+    repo_name: Optional[str] = Field(None, description="'owner/repo' short name, e.g. 'HarshalAndhale9657/ANVIL'")
     # exclude=True: never serialised (state is checkpointed to SQLite after every
     # CPN transition; a token on disk is readable by the scanned repo's code).
     github_token: Optional[str] = Field(

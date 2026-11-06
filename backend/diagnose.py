@@ -22,7 +22,7 @@ for d in sorted(os.listdir("scans"), reverse=True):
 
 print(f"[1] Repo dir: {repo_dir}")
 print(f"[2] Running recon...")
-recon = run_recon_source(repo_dir, "https://github.com/DevOpsDreamer/Anvil-Test-Target")
+recon = run_recon_source(repo_dir, "https://github.com/HarshalAndhale9657/anvil-demo-target")
 print(f"    Found {len(recon.vulnerable_endpoints)} vulns")
 
 entry = detect_entry_point(repo_dir)
