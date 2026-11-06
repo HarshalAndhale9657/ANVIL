@@ -6,7 +6,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://anvil-api.onrender.com/api/:path*"
+      "destination": "https://anvil-api-64f5.onrender.com/api/:path*"
     }
   ],
   "headers": [

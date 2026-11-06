@@ -501,7 +501,7 @@ chmod +x start.sh
 
 ```
 browser ──▶ Vercel (static React app)  ──/api/* rewrite──▶  Render (FastAPI, 1 worker)
-            anvil-aegis.vercel.app                          anvil-api.onrender.com
+            anvil-aegis.vercel.app                          anvil-api-64f5.onrender.com
 ```
 
 The browser only ever talks to the Vercel origin; `frontend/vercel.json` proxies `/api/*`
@@ -511,11 +511,13 @@ Firefox, Brave and every private window block, and then login silently fails.
 
 1. **GitHub OAuth App** (production; keep a separate one for localhost). Homepage
    `https://<frontend>`, callback **`https://<frontend>/api/auth/callback`**.
-2. **Backend → Render**: *New → Blueprint* on this repo (`render.yaml`). Enter
-   `OPENAI_API_KEY`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`; `SESSION_SECRET` is
-   generated. Set `FRONTEND_URL` / `GITHUB_REDIRECT_URI` to your frontend origin.
+2. **Backend → Render**: *New → Blueprint* on this repo (`render.yaml`). Render asks for
+   the two secrets, `OPENAI_API_KEY` and `GITHUB_CLIENT_SECRET`; `SESSION_SECRET` is
+   generated. If you fork this, change `GITHUB_CLIENT_ID`, `FRONTEND_URL` and
+   `GITHUB_REDIRECT_URI` in `render.yaml` to your own OAuth app and frontend origin.
 3. **Frontend → Vercel**: import the repo with root directory `frontend`, and point the
-   rewrite destination in `frontend/vercel.json` at your Render URL. No env vars needed.
+   rewrite destination in `frontend/vercel.json` at your Render URL (Render may add a
+   suffix such as `-64f5` to the service name). No env vars needed.
 
 | Variable | Production value | Why |
 |---|---|---|
