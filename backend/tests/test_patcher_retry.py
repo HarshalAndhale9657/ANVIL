@@ -231,3 +231,12 @@ def test_static_gate_rejects_patch_that_deletes_module_docstring():
     assert not ok and "docstring" in reason
     ok, _ = patcher._static_patch_validation(original, kept, "", "app.py")
     assert ok
+
+
+def test_match_file_edges_removes_diff_noise():
+    orig = '"""doc"""\nimport os\n'
+    assert patcher._match_file_edges(orig, '\n\n"""doc"""\nimport json') == '"""doc"""\nimport json\n'
+    assert patcher._match_file_edges(orig, '"""doc"""\nimport json\n\n\n') == '"""doc"""\nimport json\n'
+    assert patcher._match_file_edges("x = 1", "x = 2\n") == "x = 2"           # no final newline kept
+    assert patcher._match_file_edges("a\r\n", "b\n") == "b\r\n"               # CRLF preserved
+    assert patcher._match_file_edges("\nx\n", "\nx2\n") == "\nx2\n"           # leading blank kept if original had it

@@ -255,6 +255,11 @@ async def run_scan(
             # ── Store result ──────────────────────────────────────────────
             pr_url = final_state.patch.pr_url if final_state.patch else None
             vuln_count = len(final_state.recon.vulnerable_endpoints) if final_state.recon else 0
+            exploited_finding = None
+            if final_state.recon and final_state.exploit and final_state.exploit.vulnerability_confirmed:
+                from app.agents.patcher import _select_exploited_endpoint
+                exploited_finding = _select_exploited_endpoint(
+                    final_state.recon.vulnerable_endpoints, final_state.exploit)
 
             if final_state.error:
                 result = ScanResult(
@@ -264,6 +269,7 @@ async def run_scan(
                     status="failed",
                     stage=ScanStage.FAILED,
                     error=final_state.error,
+                    exploited_finding=exploited_finding,
                     recon=final_state.recon,
                     exploit=final_state.exploit,
                     verification=final_state.verification,
@@ -283,6 +289,7 @@ async def run_scan(
                         final_state.recon.vulnerable_endpoints if final_state.recon else []
                     ),
                     pr_url=pr_url,
+                    exploited_finding=exploited_finding,
                     recon=final_state.recon,
                     exploit=final_state.exploit,
                     verification=final_state.verification,

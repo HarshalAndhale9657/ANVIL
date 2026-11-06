@@ -10,6 +10,7 @@ export default function ScanComplete({ result, scanId, onReset, telemetry = fals
   const repoUrl = result.repo_url;
   const repoShort = repoUrl?.replace('https://github.com/', '') || '';
   const vulnCount = result.vulnerabilities?.length || 0;
+  const finding = result.exploited_finding || result.recon?.vulnerable_endpoints?.[0] || null;
   const framework = result.recon?.detected_framework || 'Unknown';
   const confidence = result.patch?.confidence_score != null
     ? Math.round(result.patch.confidence_score * 100) : null;
@@ -100,18 +101,20 @@ export default function ScanComplete({ result, scanId, onReset, telemetry = fals
           </div>
         )}
 
-        {/* Vulnerability type */}
-        {result.recon?.vulnerable_endpoints?.[0] && (
+        {/* The finding the exploit proved (falls back to recon's top finding) */}
+        {finding && (
           <div className={styles.finding}>
             <div className={styles.findingIcon} style={{background:'rgba(255,159,28,0.12)', borderColor:'rgba(255,159,28,0.3)', color:'var(--accent-orange)'}}>
               🔍
             </div>
             <div className={styles.findingBody}>
-              <span className={styles.findingLabel}>VULNERABILITY CONFIRMED</span>
+              <span className={styles.findingLabel}>
+                {result.exploited_finding ? 'VULNERABILITY EXPLOITED' : 'TOP FINDING'}
+              </span>
               <span className={styles.findingText}>
-                {result.recon.vulnerable_endpoints[0].injection_vector}
+                {(finding.injection_vector || '').split('\n')[0]}
                 {' on '}
-                <code className={styles.findingCode}>{result.recon.vulnerable_endpoints[0].path}</code>
+                <code className={styles.findingCode}>{finding.path}</code>
               </span>
             </div>
           </div>

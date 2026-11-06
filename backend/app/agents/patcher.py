@@ -123,6 +123,17 @@ def _one_line(text: str, limit: int = 80) -> str:
     return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
 
 
+def _match_file_edges(original: str, fixed: str) -> str:
+    """Keep the model from adding/removing leading blank lines or the final
+    newline: noise in the diff that has nothing to do with the fix."""
+    if not original[:1].isspace():
+        fixed = fixed.lstrip("\r\n")
+    fixed = fixed.rstrip("\r\n")
+    if original.endswith("\n"):
+        fixed += "\r\n" if original.endswith("\r\n") else "\n"
+    return fixed
+
+
 def _static_patch_validation(
     original_code: str,
     fixed_code: str,
@@ -442,7 +453,7 @@ def run_patch_github(
                     ],
                 )
                 raw = json.loads(response.choices[0].message.content)
-                fixed_code = raw["fixed_code"]
+                fixed_code = _match_file_edges(original_code, raw["fixed_code"])
                 explanation = raw["explanation"]
                 confidence = float(raw.get("confidence", 0.8))
                 if response.usage:

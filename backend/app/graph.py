@@ -313,7 +313,7 @@ def build_web_cpn(scan_id: str, emit_fn, loop=None) -> CPNEngine:
             if result.verified:
                 logger.info("Verification passed: %s", result.reason)
                 _emit_sync(ScanStage.VERIFY, "done",
-                            f"Exploit verified: {result.reason[:100]}", progress_pct=70)
+                            f"Exploit verified: {result.reason}", progress_pct=70)
                 state.current_node = "patch_ready"
             else:
                 # Record the failed attempt for feedback-aware retries

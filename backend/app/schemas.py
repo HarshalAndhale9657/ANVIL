@@ -272,6 +272,8 @@ class ScanResult(BaseModel):
     status: str
     stage: ScanStage
     vulnerabilities: List[VulnerableEndpoint] = []
+    # The finding the verified exploit actually proved (vs. everything recon flagged).
+    exploited_finding: Optional[VulnerableEndpoint] = None
     pr_url: Optional[str] = None
     error: Optional[str] = None
     created_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
